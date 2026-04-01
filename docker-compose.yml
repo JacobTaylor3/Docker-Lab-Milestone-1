@@ -1,0 +1,52 @@
+# docker-compose.yml
+# Spins up the full lab: C2 server + exfil/exploit server
+# Usage:
+#   docker compose up --build        (build and start both)
+#   docker compose up --build -d     (same, but detached)
+#   docker compose down              (stop and remove containers)
+#   docker compose logs -f           (tail logs from both)
+
+services:
+
+  # ── C2 Server ──────────────────────────────────────────────
+  c2-server:
+    build:
+      context: ./c2-server       # Path to the c2-server/ directory
+      dockerfile: Dockerfile
+    container_name: c2-server
+    hostname: c2-server
+    ports:
+      - "4444:4444"              # C2 listener port → host
+    environment:
+      - C2_HOST=0.0.0.0
+      - C2_PORT=4444
+    networks:
+      - labnet
+    restart: unless-stopped
+
+  # ── Exfil + Exploit Server ─────────────────────────────────
+  exfil-server:
+    build:
+      context: .                # Root context so Docker can copy c2-server files too
+      dockerfile: exfil-server/Dockerfile
+    container_name: exfil-server
+    hostname: exfil-server
+    ports:
+      - "8000:8000"              # Python HTTP server → host
+      - "8888:8888"              # CVE static web app → host
+    volumes:
+      # Persist exfiltrated data on your host so it survives
+      # container restarts
+      - ./exfil-data:/opt/exfil
+    networks:
+      - labnet
+    restart: unless-stopped
+
+# ── Shared Network ─────────────────────────────────────────
+# Both containers are on the same bridge network.
+# They can reach each other by hostname:
+#   From exfil-server:  curl http://c2-server:4444
+#   From c2-server:     curl http://exfil-server:8080
+networks:
+  labnet:
+    driver: bridge

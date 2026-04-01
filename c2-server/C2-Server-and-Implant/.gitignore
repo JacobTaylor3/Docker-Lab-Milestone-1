@@ -1,0 +1,19 @@
+# # Compiled output
+# bin/
+# *.o
+# *.a
+# *.so
+# *.out
+
+# Debug
+*.dSYM/
+.gdb_history
+gdb.txt
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

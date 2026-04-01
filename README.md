@@ -1,7 +1,8 @@
-This vulnerability is based on a website being hosted. The whole idea of it is that the victim goes to this website, does nothing, and then the exploit initiates via the shellcode in the exploit.js file (the js runs client-side –aka within the victim’s browser), and then the shellcode runs on the victim's local machine (within a form of their terminal). The shellcode (loader) then calls our python web server (hosting the implant.exe), downloads implant.exe, and runs it (all taking place within the victim's local machine). Once the implant is executed (which is on the victim's local machine), the implant executable (source written in C) then connects to our C2 server (controller.exe --also written in C) and then the C2 receives a message that a connection was made by the victim. Once the controller receives this message, the controller is able to have a reverse-shell in their terminal. This is done by allowing the controller to run windows command prompt commands (e.g. dir) remotely on the victim's machine from the controller's input. Implant.exe handles the subprocess runs, which are sent over the same ip/port by controller.exe user input.
-
-
 # Capstone Docker Lab
+
+## Plan
+
+This vulnerability is based on a website being hosted. The whole idea of it is that the victim goes to this website, does nothing, and then the exploit initiates via the shellcode in the exploit.js file (the js runs client-side –aka within the victim’s browser), and then the shellcode runs on the victim's local machine (within a form of their terminal). The shellcode (loader) then calls our python web server (hosting the implant.exe), downloads implant.exe, and runs it (all taking place within the victim's local machine). Once the implant is executed (which is on the victim's local machine), the implant executable (source written in C) then connects to our C2 server (controller.exe --also written in C) and then the C2 receives a message that a connection was made by the victim. Once the controller receives this message, the controller is able to have a reverse-shell in their terminal. This is done by allowing the controller to run windows command prompt commands (e.g. dir) remotely on the victim's machine from the controller's input. Implant.exe handles the subprocess runs, which are sent over the same ip/port by controller.exe user input.
 
 ## Project Overview
 
@@ -9,6 +10,10 @@ This lab implements a 2-container offensive pipeline:
 
 1. **c2-server** — Command-and-control listener and handler
 2. **exfil-server** — Static payload hosting (exploit website + binary distribution)
+
+## CVE Utilized
+
+1. CVE-2021-21220: https://www.cvedetails.com/cve/CVE-2021-21220/
 
 ### Behavior
 - The host IP is baked into `implant.exe` at build time — the implant connects back automatically with no user interaction after execution.

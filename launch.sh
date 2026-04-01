@@ -4,7 +4,8 @@
 #  Capstone Docker Lab — Launch Script
 # ─────────────────────────────────────────────
 
-set -e
+set -eo pipefail
+# Note: use || true on commands that are allowed to fail (e.g. docker compose down with nothing running)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
@@ -96,36 +97,11 @@ echo -e "${GREEN}[+] .env written.${NC}"
 echo ""
 echo -e "${GREEN}[+] Shellcode will be generated inside the Docker build (msfvenom runs in the builder stage).${NC}"
 
-# ── 5. Check for existing containers ─────────
+# ── 5. Stop any existing lab containers ───────
 echo ""
-echo -e "${YELLOW}[*] Checking for existing lab containers...${NC}"
-
-RUNNING=$(docker ps --filter "name=c2-server" --filter "name=exfil-server" --format "{{.Names}}" 2>/dev/null)
-STOPPED=$(docker ps -a --filter "name=c2-server" --filter "name=exfil-server" --format "{{.Names}}" 2>/dev/null)
-
-if [ -n "$RUNNING" ]; then
-    echo -e "${YELLOW}[!] Running containers found: $RUNNING${NC}"
-    read -rp "    Stop and remove them before rebuilding? (Y/n): " CONFIRM
-    CONFIRM="${CONFIRM:-Y}"
-    if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
-        echo -e "${YELLOW}[*] Stopping containers...${NC}"
-        docker compose -f "$COMPOSE_FILE" down
-        echo -e "${GREEN}[+] Containers stopped.${NC}"
-    else
-        echo -e "${RED}[!] Cannot rebuild while containers are running. Exiting.${NC}"
-        exit 1
-    fi
-elif [ -n "$STOPPED" ]; then
-    echo -e "${YELLOW}[!] Stopped containers found: $STOPPED${NC}"
-    read -rp "    Remove them before rebuilding? (Y/n): " CONFIRM
-    CONFIRM="${CONFIRM:-Y}"
-    if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
-        docker compose -f "$COMPOSE_FILE" down
-        echo -e "${GREEN}[+] Old containers removed.${NC}"
-    fi
-else
-    echo -e "${GREEN}[+] No existing lab containers found.${NC}"
-fi
+echo -e "${YELLOW}[*] Stopping any existing lab containers...${NC}"
+docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
+echo -e "${GREEN}[+] Ready to rebuild.${NC}"
 
 # ── 6. Check for port conflicts ───────────────
 echo ""

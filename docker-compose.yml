@@ -48,7 +48,7 @@ services:
 # Both containers are on the same bridge network.
 # They can reach each other by hostname:
 #   From exfil-server:  curl http://c2-server:4444
-#   From c2-server:     curl http://exfil-server:8080
+#   From c2-server:     curl http://exfil-server:8888
 networks:
   labnet:
     driver: bridge

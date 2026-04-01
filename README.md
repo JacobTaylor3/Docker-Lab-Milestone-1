@@ -11,14 +11,14 @@ This lab implements a 2-container offensive pipeline:
 1. **c2-server** — Command-and-control listener and handler
 2. **exfil-server** — Static payload hosting (exploit website + binary distribution)
 
-## CVE Utilized
-
-1. CVE-2021-21220: https://www.cvedetails.com/cve/CVE-2021-21220/
-
 ### Behavior
 - The host IP is baked into `implant.exe` at build time — the implant connects back automatically with no user interaction after execution.
 - In Docker, containers communicate by hostname (`c2-server`, `exfil-server`) on `labnet`.
 - External VM targets use the host machine's IP (`<host-ip>:4444`, `<host-ip>:8000`, `<host-ip>:8888`).
+
+## CVE Utilized
+
+1. **CVE-2021-21220**: https://www.cvedetails.com/cve/CVE-2021-21220/
 
 ---
 

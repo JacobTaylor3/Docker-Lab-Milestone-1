@@ -8,7 +8,7 @@ This lab implements a 2-container offensive pipeline:
 2. **exfil-server** — Static payload hosting (exploit website + binary distribution)
 
 ### Behavior
-- Implant uses environment variables (`C2_HOST`, `C2_PORT`) for runtime flexibility — no hardcoded IPs.
+- The host IP is baked into `implant.exe` at build time — the implant connects back automatically with no user interaction after execution.
 - In Docker, containers communicate by hostname (`c2-server`, `exfil-server`) on `labnet`.
 - External VM targets use the host machine's IP (`<host-ip>:4444`, `<host-ip>:8000`, `<host-ip>:8888`).
 
@@ -19,22 +19,27 @@ This lab implements a 2-container offensive pipeline:
 ```
 / (workspace root)
 ├── docker-compose.yml          # Starts c2-server + exfil-server on custom network
+├── launch.sh                   # One-command setup: prompts for IP, generates shellcode, builds + starts lab
+├── generate_shellcode.sh       # Standalone: regenerates shellcode + patches exploit.js for a given IP
+├── .gitignore                  # Excludes .env, compiled binaries, shellcode artifacts
 ├── README.md                   # This file
 ├── c2-server/
 │   ├── Dockerfile              # Builds C2 image (Linux controller + Windows cross-compile)
 │   └── C2-Server-and-Implant/
 │       ├── src/                # C source: controller, implant, protocol, utils
 │       ├── include/            # Headers: protocol, platform, utils
-│       ├── Makefile            # Builds Linux + Windows binaries
-│       └── bin/                # Build output
+│       ├── Makefile            # Builds Linux + Windows binaries; accepts C2_HOST_IP= to bake IP in
+│       └── bin/                # Build output (gitignored — rebuilt by Docker)
 ├── exfil-server/
-│   ├── Dockerfile              # Multi-stage: compiles implant.exe, then builds file server
+│   ├── Dockerfile              # Multi-stage: compiles implant.exe from source, then builds file server
 │   └── CVE-2021-21191---CVE-2021-21192/
 │       ├── index.html          # CVE exploit webpage
-│       ├── exploit.js          # Exploit script
+│       ├── exploit.js          # Exploit script (shellcode array patched by launch.sh)
 │       └── server.js           # Node.js static file server (port 8888)
-└── exfil-data/                 # Persisted volume for exfiltrated files
+└── exfil-data/                 # Persisted volume for exfiltrated files (gitignored)
 ```
+
+> `.env` is **not committed** — it is created automatically by `launch.sh` when you first run it.
 
 ---
 
@@ -49,12 +54,12 @@ This lab implements a 2-container offensive pipeline:
   - `C2_HOST=0.0.0.0`
   - `C2_PORT=4444`
 
-Controller reads `C2_PORT` from environment at startup to determine which port to bind.
+Controller reads `C2_PORT` from the environment at startup to determine which port to bind.
 
 ### exfil-server
 - Docker image: `docker-exfil-server`
 - Build: **multi-stage**
-  - Stage 1 (`builder`): compiles fresh `implant.exe` from source using `mingw-w64`
+  - Stage 1 (`builder`): compiles fresh `implant.exe` from source using `mingw-w64`, with host IP baked in via `-DC2_DEFAULT_HOST`
   - Stage 2: installs `nodejs`, `npm`, Python; copies compiled `implant.exe` and exploit site
 - Runs:
   - Node.js exploit site on port `8888`
@@ -84,48 +89,52 @@ Container-to-container:
 
 ## Usage
 
-**Before building, set your host IP in `.env`** — this bakes the IP into `implant.exe` at compile time so it connects back automatically when run on the Windows VM:
-
-```bash
-# Find your host IP
-ip addr show | grep "inet " | grep -v 127.0.0.1
-
-# Edit .env and fill in C2_HOST_IP
-nano .env
-# C2_HOST_IP=192.168.1.100  ← your actual IP
-```
+Everything is handled by a single script. Run it and follow the prompts:
 
 ```bash
 cd "/home/hero/Documents/CS 564/Docker"
+sudo ./launch.sh
+```
 
-# Remove old containers/images if needed
-sudo docker compose down
-sudo docker system prune -a --volumes
+`launch.sh` will:
+1. Check Docker and Docker Compose are installed
+2. Detect available network interfaces and IPs
+3. Prompt for your host IP — creates `.env` automatically (first run) or updates it
+4. Run `msfvenom` to generate shellcode with that IP and patch `exploit.js`
+5. Stop any existing lab containers
+6. Check for port conflicts on 4444, 8000, 8888
+7. Run `docker compose up --build -d`
+8. Verify both containers are running and print a summary
 
-# Build and run
-sudo docker compose up --build -d
+### Other useful commands
 
-# Check status
+```bash
+# Check container status
 sudo docker compose ps
+
+# Tail logs from both containers
 sudo docker compose logs -f c2-server exfil-server
 
 # Attach to the C2 controller (interactive menu)
 sudo docker attach c2-server
-# To detach without stopping the container: Ctrl+P then Ctrl+Q
+# Detach without stopping: Ctrl+P then Ctrl+Q
 
-# Debug into containers
+# Shell into a container for debugging
 sudo docker exec -it c2-server /bin/bash
 sudo docker exec -it exfil-server /bin/bash
 
 # Stop everything
 sudo docker compose down
+
+# Regenerate shellcode only (e.g. if IP changed)
+sudo ./generate_shellcode.sh
 ```
 
 ---
 
 ## Windows VM Network Settings
 
-Before starting the Windows VM, configure its network adapter so it can reach the Linux host. The recommended mode depends on your hypervisor.
+Before starting the Windows VM, configure its network adapter so it can reach the Linux host.
 
 ### Recommended: Bridged Adapter
 
@@ -142,16 +151,12 @@ The VM gets its own IP on the same physical network as your Linux machine. The L
 2. Select `Bridged: Connected directly to the physical network`
 3. Click OK, start the VM
 
-After booting, the Windows VM will get a DHCP address on the same subnet as your Linux host. Verify connectivity:
+After booting, verify the VM can reach the host:
 ```cmd
 ping <linux-host-ip>
 ```
 
----
-
 ### Alternative: Host-Only (isolated lab, no internet on VM)
-
-Use this if you want the VM isolated from your wider network. The VM can only reach the Linux host, not the internet.
 
 **VirtualBox:**
 1. Go to **File → Tools → Network Manager** and ensure a Host-Only network exists (e.g. `vboxnet0`, typically `192.168.56.0/24`)
@@ -162,25 +167,18 @@ Use this if you want the VM isolated from your wider network. The VM can only re
 1. VM **Settings → Network Adapter** → `Host-only: A private network shared with the host`
 2. Your Linux host's VMnet1 IP is the `C2_HOST_IP` (check with `ip addr show vmnet1`)
 
----
-
 ### What NOT to use
 
 | Mode | Why it won't work |
 |------|-------------------|
-| **NAT** | VM shares the host's IP — the Windows VM cannot reach `HOST_IP:8000` or `HOST_IP:4444` directly |
+| **NAT** | VM shares the host's IP — cannot reach `HOST_IP:8000` or `HOST_IP:4444` directly |
 | **Internal Network** | VMs can only talk to each other, not the Linux host |
 
 ---
 
-## Accessing from an External Windows VM
+## Accessing from the Windows VM
 
 From a Windows VM, `localhost` refers to the VM itself. Use your **Linux host IP** instead.
-
-**Find your Linux host IP:**
-```bash
-ip addr show | grep "inet " | grep -v 127.0.0.1
-```
 
 | What | URL |
 |---|---|
@@ -225,32 +223,40 @@ Select a command:
 
 ## Bugs Fixed
 
-### Bug 1 — Controller hardcoded port 8080 (c2-server/C2-Server-and-Implant/src/controller.c)
+### Bug 1 — Controller hardcoded port 8080
 
-**Problem:** The controller source had `htons(8080)` hardcoded. The implant connects to port `4444` (via `C2_PORT` env var) and docker-compose only exposes `4444:4444`. The implant could never connect.
+**File:** `c2-server/C2-Server-and-Implant/src/controller.c`
 
-**Fix:** Controller now reads `C2_PORT` from the environment at startup, defaulting to `4444` if unset. The hardcoded `8080` was removed.
+**Problem:** The controller had `htons(8080)` hardcoded. The implant connects to port `4444` (via `C2_PORT` env var) and docker-compose only exposes `4444:4444`. The implant could never connect.
+
+**Fix:** Controller now reads `C2_PORT` from the environment at startup, defaulting to `4444` if unset.
 
 ---
 
 ### Bug 2 — exfil-server served stale pre-built implant.exe
 
-**Problem:** The exfil-server Dockerfile copied `bin/windows/implant.exe` directly from the host repo — a pre-built binary that predates the env var (`C2_HOST`/`C2_PORT`) support. The c2-server container compiled a fresh binary from source, but it stayed inside that container and was never shared. The Windows VM therefore downloaded an old binary that had `192.168.30.10` hardcoded and could not connect to the lab host.
+**File:** `exfil-server/Dockerfile`
 
-**Fix:** Converted exfil-server to a **multi-stage Docker build**. Stage 1 (`builder`) compiles `implant.exe` fresh from source using `mingw-w64`. Stage 2 copies the compiled binary from Stage 1. No manual `make` on the host is ever required.
+**Problem:** The Dockerfile copied `bin/windows/implant.exe` from the host repo — a pre-built binary with `192.168.30.10` hardcoded. The c2-server container compiled a fresh binary but it stayed inside that container and was never shared with exfil-server.
 
----
-
-### Bug 4 — implant.exe had no baked-in C2 IP for autonomous execution
-
-**Problem:** The implant fell back to the hostname `"c2-server"` when `C2_HOST` was not set. On an external Windows VM, that hostname does not resolve — the implant silently fails to connect. After an exploit fires the implant automatically, there is no opportunity to set env vars.
-
-**Fix:** The host IP is now passed as a Docker build argument (`C2_HOST_IP`) through `docker-compose.yml` → `exfil-server/Dockerfile` → `make` → `-DC2_DEFAULT_HOST="<ip>"` into the compiler. The IP is baked into the binary at build time. Set `C2_HOST_IP` in the `.env` file before running `docker compose up --build`.
+**Fix:** Converted to a multi-stage Docker build. Stage 1 (`builder`) compiles `implant.exe` fresh from source. Stage 2 copies it from Stage 1. The host repo binary is no longer used or tracked in git.
 
 ---
 
 ### Bug 3 — Python file server bound to localhost only
 
-**Problem:** `python3 -m http.server` in Python 3.11 can default to binding `localhost` (127.0.0.1), making port 8000 unreachable from outside the container.
+**File:** `exfil-server/Dockerfile`
 
-**Fix:** Added `--bind 0.0.0.0` to the CMD so the server explicitly listens on all interfaces.
+**Problem:** `python3 -m http.server` can default to binding `127.0.0.1` in Python 3.11, making port 8000 unreachable from outside the container.
+
+**Fix:** Added `--bind 0.0.0.0` so the server listens on all interfaces.
+
+---
+
+### Bug 4 — implant.exe had no baked-in C2 IP for autonomous execution
+
+**Files:** `src/implant.c`, `Makefile`, `exfil-server/Dockerfile`, `docker-compose.yml`
+
+**Problem:** The implant fell back to the hostname `"c2-server"` when `C2_HOST` was not set. On an external Windows VM that hostname does not resolve. After an exploit fires the implant automatically, there is no opportunity to set env vars.
+
+**Fix:** The host IP flows from `.env` → `docker-compose.yml` build arg → `exfil-server/Dockerfile` ARG → `make C2_HOST_IP=<ip>` → `-DC2_DEFAULT_HOST="<ip>"` compiler flag → baked into `implant.exe`. `launch.sh` handles this automatically at startup.

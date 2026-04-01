@@ -110,9 +110,9 @@ sudo docker compose down
 
 ## How the payload flow works
 
-1. exfil site hosts download page at `http://<host-ip>:8888` and raw payload at `http://<host-ip>:8000/implant.exe`.
-2. Windows target downloads payload from one of those URLs.
-3. Target executes payload; in Windows target, payload reads `C2_HOST`/`C2_PORT` (set via env/command args).
+1. exfil site hosts exploitable webpage page at `http://<host-ip>:8888` and raw implant.exe at `http://<host-ip>:8000/implant.exe`.
+2. Windows target downloads implant from `http://<host-ip>:8000/implant.exe` .
+3. Target executes implant; in Windows target, payload reads `C2_HOST`/`C2_PORT` (set via env/command args).
 4. Payload connects back to C2 listener `http://<host-ip>:4444`/TCP `4444`.
 5. `c2-server` receives and manages command-and-control traffic.
 

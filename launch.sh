@@ -56,6 +56,10 @@ fi
 
 # ── 3. Prompt for host IP ─────────────────────
 echo ""
+if [ ! -f "$ENV_FILE" ]; then
+    echo -e "${YELLOW}[*] No .env file found — creating one now.${NC}"
+fi
+
 CURRENT_IP=$(grep -oP '(?<=C2_HOST_IP=)\S+' "$ENV_FILE" 2>/dev/null || echo "")
 
 if [ -n "$CURRENT_IP" ]; then
@@ -63,6 +67,11 @@ if [ -n "$CURRENT_IP" ]; then
     read -rp "    Enter new host IP (or press Enter to keep '$CURRENT_IP'): " INPUT_IP
     HOST_IP="${INPUT_IP:-$CURRENT_IP}"
 else
+    echo "    Available IPs:"
+    ip -o -4 addr show | awk '{print $2, $4}' | grep -v '^lo ' | grep -v '127\.' | while read -r iface ip; do
+        echo -e "      ${GREEN}$iface${NC} → ${ip%/*}"
+    done
+    echo ""
     read -rp "    Enter your Linux host IP (e.g. 192.168.1.100): " HOST_IP
 fi
 
@@ -81,7 +90,7 @@ cat > "$ENV_FILE" <<EOF
 C2_HOST_IP=${HOST_IP}
 EOF
 
-echo -e "${GREEN}[+] .env updated.${NC}"
+echo -e "${GREEN}[+] .env written.${NC}"
 
 # ── 4. Generate shellcode + patch exploit.js ──
 echo ""

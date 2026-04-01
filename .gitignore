@@ -1,0 +1,21 @@
+# ── Environment / secrets ──────────────────────
+# Contains C2_HOST_IP — machine-specific and should never be committed
+.env
+
+# ── Generated shellcode artifacts ──────────────
+shellcode.bin
+exploit.js.bak
+
+# ── Compiled binaries ───────────────────────────
+# Docker rebuilds these from source — no need to track them
+c2-server/C2-Server-and-Implant/bin/
+
+# ── Runtime exfil data ──────────────────────────
+# Volume-mounted at runtime, not part of the project
+exfil-data/
+
+# ── OS / editor noise ───────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

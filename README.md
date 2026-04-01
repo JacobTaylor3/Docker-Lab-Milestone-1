@@ -16,7 +16,7 @@ This lab implements a 2-container offensive pipeline:
 - In Docker, containers communicate by hostname (`c2-server`, `exfil-server`) on `labnet`.
 - External VM targets use the host machine's IP (`<host-ip>:4444`, `<host-ip>:8000`, `<host-ip>:8888`).
 
-## CVE Utilized
+### CVE Utilized
 
 1. **CVE-2021-21220**: https://www.cvedetails.com/cve/CVE-2021-21220/
 

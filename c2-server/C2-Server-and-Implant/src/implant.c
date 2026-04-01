@@ -22,8 +22,12 @@ int connect_to_controller()
     const char *CONTROLLER_IP_ADDR = getenv("C2_HOST");
     const char *controller_port = getenv("C2_PORT");
 
+#ifndef C2_DEFAULT_HOST
+#define C2_DEFAULT_HOST "c2-server"
+#endif
+
     if (CONTROLLER_IP_ADDR == NULL || CONTROLLER_IP_ADDR[0] == '\0') {
-        CONTROLLER_IP_ADDR = "c2-server"; // use docker service host by default
+        CONTROLLER_IP_ADDR = C2_DEFAULT_HOST;
     }
 
     int port_num = 4444;

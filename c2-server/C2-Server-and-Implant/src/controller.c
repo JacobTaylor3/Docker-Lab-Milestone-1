@@ -108,10 +108,17 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    int port = 4444;
+    const char *env_port = getenv("C2_PORT");
+    if (env_port != NULL && env_port[0] != '\0') {
+        int p = atoi(env_port);
+        if (p > 0) port = p;
+    }
+
     struct sockaddr_in server_ip_structure;
     memset(&server_ip_structure, 0, sizeof(server_ip_structure));
     server_ip_structure.sin_family = AF_INET;
-    server_ip_structure.sin_port = htons(8080);
+    server_ip_structure.sin_port = htons(port);
     server_ip_structure.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(controller_fd, (struct sockaddr *)&server_ip_structure, sizeof(server_ip_structure)) < 0)
@@ -125,7 +132,7 @@ int main(int argc, char *argv[])
     printf("<Controller Listening on port: %d> \n\n", ntohs(server_ip_structure.sin_port));
 
     if (listen(controller_fd, 2) < 0)
-    { // listening on port 8080
+    {
 
         perror("listen");
         close(controller_fd);

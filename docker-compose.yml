@@ -29,6 +29,8 @@ services:
     build:
       context: .                # Root context so Docker can copy c2-server files too
       dockerfile: exfil-server/Dockerfile
+      args:
+        - C2_HOST_IP=${C2_HOST_IP}
     container_name: exfil-server
     hostname: exfil-server
     ports:

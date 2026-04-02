@@ -3,7 +3,7 @@
 # ─────────────────────────────────────────────
 #  Shellcode Regeneration — triggers Docker rebuild
 # ─────────────────────────────────────────────
-# msfvenom now runs inside the Docker builder stage, not on the host.
+# msfvenom runs inside the Docker builder stage.
 # To regenerate shellcode with a new IP, update .env and rebuild.
 
 set -e
@@ -55,7 +55,7 @@ C2_HOST_IP=${HOST_IP}
 EOF
 echo -e "${GREEN}[+] .env updated with C2_HOST_IP=${HOST_IP}${NC}"
 
-# ── Rebuild exfil-server only ─────────────────
+# ── Rebuild exfil-server ──────────────────────
 echo ""
 echo -e "${YELLOW}[*] Rebuilding exfil-server (msfvenom + shellcode patch runs inside Docker)...${NC}"
 echo ""

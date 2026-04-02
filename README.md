@@ -27,8 +27,8 @@ This lab implements a 2-container offensive pipeline:
 ```
 / (workspace root)
 ├── docker-compose.yml          # Starts c2-server + exfil-server on custom network
-├── launch.sh                   # One-command setup: prompts for IP, generates shellcode, builds + starts lab
-├── generate_shellcode.sh       # Standalone: regenerates shellcode + patches exploit.js for a given IP
+├── launch.sh                   # One-command setup: prompts for IP, builds + starts lab
+├── generate_shellcode.sh       # Standalone: updates IP in .env and rebuilds exfil-server
 ├── .gitignore                  # Excludes .env, compiled binaries, shellcode artifacts
 ├── README.md                   # This file
 ├── c2-server/
@@ -39,10 +39,10 @@ This lab implements a 2-container offensive pipeline:
 │       ├── Makefile            # Builds Linux + Windows binaries; accepts C2_HOST_IP= to bake IP in
 │       └── bin/                # Build output (gitignored — rebuilt by Docker)
 ├── exfil-server/
-│   ├── Dockerfile              # Multi-stage: compiles implant.exe from source, then builds file server
+│   ├── Dockerfile              # Multi-stage (Kali builder): runs msfvenom, compiles implant.exe, builds file server
 │   └── CVE-2021-21191---CVE-2021-21192/
 │       ├── index.html          # CVE exploit webpage
-│       ├── exploit.js          # Exploit script (shellcode array patched by launch.sh)
+│       ├── exploit.js          # Exploit script (shellcode patched by msfvenom at build time)
 │       └── server.js           # Node.js static file server (port 8888)
 └── exfil-data/                 # Persisted volume for exfiltrated files (gitignored)
 ```
@@ -66,9 +66,9 @@ Controller reads `C2_PORT` from the environment at startup to determine which po
 
 ### exfil-server
 - Docker image: `docker-exfil-server`
-- Build: **multi-stage**
-  - Stage 1 (`builder`): compiles fresh `implant.exe` from source using `mingw-w64`, with host IP baked in via `-DC2_DEFAULT_HOST`
-  - Stage 2: installs `nodejs`, `npm`, Python; copies compiled `implant.exe` and exploit site
+- Build: **multi-stage** using Kali Linux as the builder
+  - Stage 1 (`builder`): runs `msfvenom` to generate shellcode and patch `exploit.js`, then compiles `implant.exe` from source with host IP baked in
+  - Stage 2: installs `nodejs`, `npm`, Python; copies compiled `implant.exe` and patched exploit site
 - Runs:
   - Node.js exploit site on port `8888`
   - Python static file server on port `8000`
@@ -111,22 +111,7 @@ Verify it works:
 sudo docker run --rm debian:bookworm-slim apt-get update
 ```
 
----
-
-### msfvenom (required before first run)
-
-`msfvenom` must be installed on the host. The Metasploit apt repo does **not** support Ubuntu 24.04 (Noble), so use Rapid7's universal installer instead:
-
-```bash
-curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > /tmp/msfinstall
-chmod 755 /tmp/msfinstall
-sudo /tmp/msfinstall
-```
-
-Verify it worked:
-```bash
-msfvenom --version
-```
+> **No other host dependencies required.** `msfvenom` and all build tools run inside Docker — nothing needs to be installed on the host machine beyond Docker itself.
 
 ---
 
@@ -145,7 +130,7 @@ sudo ./launch.sh
 3. Prompt for your host IP — auto-fills with `vboxnet0` if detected, creates `.env` automatically
 4. Stop any existing lab containers
 5. Check for port conflicts on 4444, 8000, 8888
-6. Run `docker compose up --build -d` — msfvenom runs inside the Docker build to generate and patch shellcode
+6. Run `docker compose up --build -d` — msfvenom runs inside the Docker build to generate shellcode and patch `exploit.js`
 7. Verify both containers are running and print a summary
 
 ### Other useful commands
@@ -185,7 +170,7 @@ Before starting the Windows VM, configure its network adapter so it can reach th
 
 ### Required: Host-Only Adapter
 
-Use a Host-Only adapter. This gives the VM a private network shared with the Linux host, which is reliable across all hardware setups.
+Use a Host-Only adapter. This gives the VM a private network shared with the Linux host, which is reliable across all hardware setups. `launch.sh` will automatically detect and recommend this IP.
 
 **VirtualBox:**
 1. With the VM powered off, open **Settings → Network**
@@ -246,7 +231,7 @@ sudo ufw allow 8888/tcp
 
 ## C2 Controller Commands
 
-Once an implant connects, `sudo docker attach c2-server` shows:
+Once an implant connects, `sudo docker attach c2-server` shows the menu immediately:
 
 ```
 Select a command:
@@ -299,3 +284,35 @@ Select a command:
 **Problem:** The implant fell back to the hostname `"c2-server"` when `C2_HOST` was not set. On an external Windows VM that hostname does not resolve. After an exploit fires the implant automatically, there is no opportunity to set env vars.
 
 **Fix:** The host IP flows from `.env` → `docker-compose.yml` build arg → `exfil-server/Dockerfile` ARG → `make C2_HOST_IP=<ip>` → `-DC2_DEFAULT_HOST="<ip>"` compiler flag → baked into `implant.exe`. `launch.sh` handles this automatically at startup.
+
+---
+
+### Bug 5 — msfvenom shellcode had incorrect Windows path escaping
+
+**File:** `exfil-server/Dockerfile`
+
+**Problem:** The original Dockerfile used `C:\\\\Windows\\\\Temp` in the msfvenom `CMD` parameter. After shell processing inside the Docker `RUN` instruction, this became `C:\\Windows\\Temp` (double backslash). PowerShell single-quoted strings treat backslashes as literals, so `\\` was interpreted as two backslashes — an invalid path — causing the shellcode's download step to silently fail.
+
+**Fix:** Changed to `C:\\Windows\\Temp` in the Dockerfile (two backslashes), which shell-processes to `C:\Windows\Temp` (one backslash) — the correct Windows path.
+
+---
+
+### Bug 6 — msfvenom ran on the host, failing on unsupported OS
+
+**File:** `exfil-server/Dockerfile`, `launch.sh`, `generate_shellcode.sh`
+
+**Problem:** Shellcode generation required `msfvenom` to be installed on the host. The Metasploit apt repo does not support Ubuntu 24.04 (Noble) and Rapid7's installer does not support Debian bookworm, making setup fragile and host-dependent.
+
+**Fix:** Moved `msfvenom` entirely inside the Docker build. The builder stage now uses `kalilinux/kali-rolling` as its base, which has `metasploit-framework` in its native repos. Shellcode is generated and `exploit.js` is patched automatically during `docker compose up --build`. No host installation of msfvenom is required.
+
+---
+
+### Bug 7 — C2 controller prompt not visible after `docker attach`
+
+**Files:** `c2-server/C2-Server-and-Implant/src/controller.c`, `docker-compose.yml`
+
+**Problem 1:** The controller used `printf("> ")` without a trailing newline and no `fflush(stdout)`. C's stdio only auto-flushes on a newline, so the prompt sat in the output buffer and was never displayed — leaving the terminal blank after attaching.
+
+**Problem 2:** The container was started without `tty: true` or `stdin_open: true`, so `docker attach` had no proper TTY to connect to, causing `fgets` to immediately return EOF and spam "Input error. Try again."
+
+**Fix:** Added `fflush(stdout)` after the prompt in `display_prompt()`. Added `tty: true` and `stdin_open: true` to the c2-server service in `docker-compose.yml`. The menu now appears immediately when an implant connects.

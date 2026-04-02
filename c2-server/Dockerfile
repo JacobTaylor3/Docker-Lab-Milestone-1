@@ -1,22 +1,25 @@
-# C2 Server Container for C2-Server-and-Implant
-FROM debian:bookworm-slim
+# Stage 1: Build Linux controller only
+FROM debian:bookworm-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    gcc \
     make \
-    mingw-w64 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/c2
+COPY C2-Server-and-Implant/ ./
+RUN make bin/linux/controller
+
+# Stage 2: Lean runtime image — no compilers
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-openbsd \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/c2
-
-# Copy the cloned project contents (Makefile + src + bin)
-COPY C2-Server-and-Implant/ ./
-
-# Build both Linux and Windows implants
-RUN make
+COPY --from=builder /opt/c2/bin/linux/controller ./bin/linux/controller
 
 EXPOSE 4444
 CMD ["./bin/linux/controller"]

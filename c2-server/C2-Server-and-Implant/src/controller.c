@@ -46,6 +46,7 @@ void display_prompt()
     printf("  5 - WRITE_DATA\n");
     printf("  6 - RUN_CMD\n");
     printf("> ");
+    fflush(stdout);
 }
 
 int console_input()

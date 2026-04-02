@@ -95,6 +95,41 @@ Container-to-container:
 
 ---
 
+## Prerequisites
+
+### Docker DNS (required on Ubuntu with systemd-resolved)
+
+Ubuntu uses `127.0.0.53` as its DNS resolver, which Docker containers cannot reach (it's a loopback address). Without this fix, `apt-get` inside containers fails with exit code 100.
+
+```bash
+echo '{"dns": ["8.8.8.8", "8.8.4.4"]}' | sudo tee /etc/docker/daemon.json
+sudo systemctl restart docker
+```
+
+Verify it works:
+```bash
+sudo docker run --rm debian:bookworm-slim apt-get update
+```
+
+---
+
+### msfvenom (required before first run)
+
+`msfvenom` must be installed on the host. The Metasploit apt repo does **not** support Ubuntu 24.04 (Noble), so use Rapid7's universal installer instead:
+
+```bash
+curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > /tmp/msfinstall
+chmod 755 /tmp/msfinstall
+sudo /tmp/msfinstall
+```
+
+Verify it worked:
+```bash
+msfvenom --version
+```
+
+---
+
 ## Usage
 
 Everything is handled by a single script. Run it and follow the prompts:
@@ -106,13 +141,12 @@ sudo ./launch.sh
 
 `launch.sh` will:
 1. Check Docker and Docker Compose are installed
-2. Detect available network interfaces and IPs
-3. Prompt for your host IP — creates `.env` automatically (first run) or updates it
-4. Run `msfvenom` to generate shellcode with that IP and patch `exploit.js`
-5. Stop any existing lab containers
-6. Check for port conflicts on 4444, 8000, 8888
-7. Run `docker compose up --build -d`
-8. Verify both containers are running and print a summary
+2. Detect available network interfaces — highlights the `vboxnet0` host-only adapter IP
+3. Prompt for your host IP — auto-fills with `vboxnet0` if detected, creates `.env` automatically
+4. Stop any existing lab containers
+5. Check for port conflicts on 4444, 8000, 8888
+6. Run `docker compose up --build -d` — msfvenom runs inside the Docker build to generate and patch shellcode
+7. Verify both containers are running and print a summary
 
 ### Other useful commands
 
@@ -131,6 +165,11 @@ sudo docker attach c2-server
 sudo docker exec -it c2-server /bin/bash
 sudo docker exec -it exfil-server /bin/bash
 
+# Stop everything, restart cleanly, and re-attach to C2
+sudo docker compose down
+sudo docker compose up -d
+sudo docker attach c2-server
+
 # Stop everything
 sudo docker compose down
 
@@ -144,41 +183,33 @@ sudo ./generate_shellcode.sh
 
 Before starting the Windows VM, configure its network adapter so it can reach the Linux host.
 
-### Recommended: Bridged Adapter
+### Required: Host-Only Adapter
 
-The VM gets its own IP on the same physical network as your Linux machine. The Linux host IP is directly reachable from the VM.
+Use a Host-Only adapter. This gives the VM a private network shared with the Linux host, which is reliable across all hardware setups.
 
 **VirtualBox:**
 1. With the VM powered off, open **Settings → Network**
-2. Set **Attached to** → `Bridged Adapter`
-3. Set **Name** → your active physical NIC (e.g. `eth0`, `wlan0`)
+2. Set **Attached to** → `Host-only Adapter`
+3. Set **Name** → `vboxnet0` (create it first if it doesn't exist: **File → Tools → Network Manager**)
 4. Click OK, start the VM
+5. Find the host-only IP on Linux: `ip addr show vboxnet0` — this is your `C2_HOST_IP`
 
 **VMware Workstation:**
 1. With the VM powered off, open **VM → Settings → Network Adapter**
-2. Select `Bridged: Connected directly to the physical network`
+2. Select `Host-only: A private network shared with the host`
 3. Click OK, start the VM
+4. Find the host-only IP on Linux: `ip addr show vmnet1` — this is your `C2_HOST_IP`
 
 After booting, verify the VM can reach the host:
 ```cmd
-ping <linux-host-ip>
+ping <host-only-ip>
 ```
-
-### Alternative: Host-Only (isolated lab, no internet on VM)
-
-**VirtualBox:**
-1. Go to **File → Tools → Network Manager** and ensure a Host-Only network exists (e.g. `vboxnet0`, typically `192.168.56.0/24`)
-2. VM **Settings → Network** → `Host-only Adapter` → select `vboxnet0`
-3. Your Linux host appears to the VM as `192.168.56.1` — use this as your `C2_HOST_IP`
-
-**VMware Workstation:**
-1. VM **Settings → Network Adapter** → `Host-only: A private network shared with the host`
-2. Your Linux host's VMnet1 IP is the `C2_HOST_IP` (check with `ip addr show vmnet1`)
 
 ### What NOT to use
 
 | Mode | Why it won't work |
 |------|-------------------|
+| **Bridged** | Depends on physical NIC and network — unreliable in many environments |
 | **NAT** | VM shares the host's IP — cannot reach `HOST_IP:8000` or `HOST_IP:4444` directly |
 | **Internal Network** | VMs can only talk to each other, not the Linux host |
 

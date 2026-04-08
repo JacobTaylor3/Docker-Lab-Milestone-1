@@ -28,7 +28,6 @@ This lab implements a 2-container offensive pipeline:
 / (workspace root)
 ├── docker-compose.yml          # Starts c2-server + exfil-server on custom network
 ├── launch.sh                   # One-command setup: prompts for IP, builds + starts lab
-├── generate_shellcode.sh       # Standalone: updates IP in .env and rebuilds exfil-server
 ├── .gitignore                  # Excludes .env, compiled binaries, shellcode artifacts
 ├── README.md                   # This file
 ├── c2-server/
@@ -39,11 +38,16 @@ This lab implements a 2-container offensive pipeline:
 │       ├── Makefile            # Builds Linux + Windows binaries; accepts C2_HOST_IP= to bake IP in
 │       └── bin/                # Build output (gitignored — rebuilt by Docker)
 ├── exfil-server/
-│   ├── Dockerfile              # Multi-stage (Kali builder): runs msfvenom, compiles implant.exe, builds file server
-│   └── CVE-2021-21191---CVE-2021-21192/
-│       ├── index.html          # CVE exploit webpage
-│       ├── exploit.js          # Exploit script (shellcode patched by msfvenom at build time)
-│       └── server.js           # Node.js static file server (port 8888)
+│   ├── Dockerfile              # Multi-stage (Debian builder): compiles loader.exe, runs Donut, compiles implant.exe, builds file server
+│   ├── shellcode-generation/
+│   │   ├── loader.c            # Windows downloader: downloads implant.exe from exfil-server and executes it
+│   │   ├── Makefile            # Compiles loader.exe (mingw-w64) then converts to shellcode via Donut; accepts HOST_IP=
+│   │   └── donut               # Donut binary (Linux x64) — converts PE to position-independent shellcode
+│   ├── exploit-contents/
+│   │   ├── index.html          # CVE exploit webpage
+│   │   ├── exploit.js          # Exploit script (shellcode array patched at Docker build time)
+│   │   └── server.js           # Node.js static file server (port 8888)
+│   └── web-server/             # Stealth HTTPS file server (nginx header masking, TLS)
 └── exfil-data/                 # Persisted volume for exfiltrated files (gitignored)
 ```
 
@@ -66,8 +70,12 @@ Controller reads `C2_PORT` from the environment at startup to determine which po
 
 ### exfil-server
 - Docker image: `docker-exfil-server`
-- Build: **multi-stage** using Kali Linux as the builder
-  - Stage 1 (`builder`): runs `msfvenom` to generate shellcode and patch `exploit.js`, then compiles `implant.exe` from source with host IP baked in
+- Build: **multi-stage** using Debian as the builder
+  - Stage 1 (`builder`):
+    1. Compiles `loader.c` → `loader.exe` (mingw-w64 cross-compile) with `SERVER_URL=http://<host-ip>:8000/implant.exe` baked in
+    2. Runs Donut on `loader.exe` → `loader.bin` (position-independent shellcode)
+    3. Patches the shellcode byte array into `exploit.js`
+    4. Compiles `implant.exe` from source with C2 host IP baked in
   - Stage 2: installs `nodejs`, `npm`, Python; copies compiled `implant.exe` and patched exploit site
 - Runs:
   - Node.js exploit site on port `8888`
@@ -158,8 +166,8 @@ sudo docker attach c2-server
 # Stop everything
 sudo docker compose down
 
-# Regenerate shellcode only (e.g. if IP changed)
-sudo ./generate_shellcode.sh
+# Regenerate shellcode with a new IP (updates .env and rebuilds exfil-server only)
+sudo ./launch.sh
 ```
 
 ---
@@ -303,7 +311,22 @@ Select a command:
 
 **Problem:** Shellcode generation required `msfvenom` to be installed on the host. The Metasploit apt repo does not support Ubuntu 24.04 (Noble) and Rapid7's installer does not support Debian bookworm, making setup fragile and host-dependent.
 
-**Fix:** Moved `msfvenom` entirely inside the Docker build. The builder stage now uses `kalilinux/kali-rolling` as its base, which has `metasploit-framework` in its native repos. Shellcode is generated and `exploit.js` is patched automatically during `docker compose up --build`. No host installation of msfvenom is required.
+**Fix (initial):** Moved `msfvenom` inside Docker using `kalilinux/kali-rolling` as the builder base. Shellcode was generated and `exploit.js` patched automatically during `docker compose up --build`.
+
+---
+
+### Bug 8 — msfvenom replaced with custom loader + Donut shellcode pipeline
+
+**Files:** `exfil-server/shellcode-generation/loader.c`, `exfil-server/shellcode-generation/Makefile`, `exfil-server/Dockerfile`
+
+**Problem:** The msfvenom-generated shellcode ran a generic PowerShell one-liner. Replacing it with a purpose-built loader allows full control over the download-and-execute logic (paths, flags, error codes) while keeping the shellcode compact.
+
+**Fix:** Introduced a custom Windows downloader (`loader.c`) that uses `URLDownloadToFileA` + `CreateProcessA` to fetch and silently execute `implant.exe`. The build pipeline is:
+1. `loader.c` is cross-compiled to `loader.exe` by mingw-w64 with `SERVER_URL=http://<host-ip>:8000/implant.exe` baked in via `-D` flag
+2. Donut converts `loader.exe` → `loader.bin` (position-independent shellcode)
+3. A Python script patches the shellcode byte array into the `var shellcode = [...]` line of `exploit.js`
+
+The builder stage now uses `debian:bookworm-slim` (lighter than Kali) since `msfvenom` is no longer needed — only `mingw-w64`, `make`, and `python3`.
 
 ---
 

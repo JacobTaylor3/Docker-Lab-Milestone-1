@@ -118,7 +118,7 @@ Verify it works:
 sudo docker run --rm debian:bookworm-slim apt-get update
 ```
 
-> **No other host dependencies required.** `msfvenom` and all build tools run inside Docker — nothing needs to be installed on the host machine beyond Docker itself.
+> **Host dependencies:** `nasm` (shellcode assembler) and `mingw-w64` (Windows cross-compiler) must be installed on the host — `launch.sh` checks for both and will tell you if they are missing.
 
 ---
 
@@ -274,17 +274,48 @@ Returns session info → Administrator. Returns `Access is denied` → not eleva
 
 ## C2 Controller Commands
 
-Once an implant connects, `sudo docker attach c2-server` shows the menu immediately:
+Once an implant connects, `sudo docker attach c2-server` shows the menu immediately. A status header appears above the menu on every prompt showing whether persistence is active:
 
 ```
++------------------------------------+
+| C2 Controller                      |
+| Persistence: ENABLED               |
++------------------------------------+
 Select a command:
-  1 - HEARTBEAT    Check implant is alive
-  2 - SET_SLEEP    Make implant sleep N seconds, then reconnect
-  3 - SHUTDOWN     Terminate implant
-  4 - READ_DATA    Read a file from the target
-  5 - WRITE_DATA   Write a file to the target
-  6 - RUN_CMD      Execute a shell command on the target
+  1 - HEARTBEAT                  Check implant is alive
+  2 - SET_SLEEP                  Make implant sleep N seconds, then reconnect
+  3 - SHUTDOWN    (removes implant + task)
+  4 - READ_DATA                  Read a file from the target
+  5 - WRITE_DATA                 Write a file to the target
+  6 - RUN_CMD                    Execute a shell command on the target
+  7 - ENABLE PERSISTENCE         Create scheduled task on target
 ```
+
+| Command | Description |
+|---|---|
+| HEARTBEAT | Sends a ping to the implant; expects `ALIVE` response. Confirms the connection is still live. |
+| SET_SLEEP | Implant disconnects, sleeps N seconds, then reconnects. Controller waits at `accept()` for the reconnection. |
+| SHUTDOWN | Implant deletes the scheduled task and its own executable (`C:\Users\Public\i.exe`), sends a confirmation, then exits. Controller exits cleanly. |
+| READ_DATA | Reads a file at a given path on the target and returns its contents. |
+| WRITE_DATA | Writes arbitrary data to a file at a given path on the target. |
+| RUN_CMD | Runs a shell command on the target via `popen` and returns stdout. |
+| ENABLE PERSISTENCE | Creates a scheduled task (`MicrosoftEdgeUpdate`) that runs the implant as SYSTEM on every user login. Updates the persistence status header. |
+
+### Persistence Status Header
+
+The controller auto-detects persistence immediately after the implant sends its HELLO packet by silently running a `schtasks /query` check. The result is shown in the header on every prompt:
+
+| Status | Meaning |
+|---|---|
+| `UNKNOWN` | Auto-detection failed (connection issue during check) |
+| `DISABLED` | Scheduled task does not exist on the target |
+| `ENABLED` | Scheduled task exists — implant will survive reboots |
+
+### Implant Reconnect Behavior
+
+The implant retries the C2 connection every 30 seconds if it fails — both on initial startup and after waking from `SET_SLEEP`. This means:
+- If the C2 server is not yet up when the machine boots, the implant keeps retrying until it connects
+- The controller loops back to `accept()` automatically when a connection drops, so no container restart is needed between sessions
 
 ---
 

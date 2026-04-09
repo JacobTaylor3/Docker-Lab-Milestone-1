@@ -230,10 +230,45 @@ sudo ufw allow 8888/tcp
 ## Payload Flow
 
 1. Windows VM browses to `http://<host-ip>:8888` (CVE exploit page).
-2. Exploit fires — shellcode runs PowerShell, downloads `implant.exe` from `http://<host-ip>:8000/implant.exe` and executes it silently.
-3. Implant automatically connects back to `<host-ip>:4444` — no user input needed, IP is baked in at build time.
-4. C2 controller receives the connection and presents the interactive command menu.
-5. Operator attaches via `sudo docker attach c2-server` and issues commands.
+2. Exploit fires — shellcode runs PowerShell, downloads `implant.exe` from `http://<host-ip>:8000/implant.exe` silently.
+3. PowerShell performs a fodhelper UAC bypass to run `implant.exe` as Administrator (no UAC prompt shown).
+4. Implant automatically connects back to `<host-ip>:4444` — no user input needed, IP is baked in at build time.
+5. C2 controller receives the connection and presents the interactive command menu.
+6. Operator attaches via `sudo docker attach c2-server` and issues commands.
+
+## Privilege Escalation — fodhelper UAC Bypass
+
+The implant runs as Administrator without triggering a UAC prompt, provided the victim user is a member of the local Administrators group (standard on personal/lab Windows installs).
+
+`fodhelper.exe` is a Microsoft-signed binary on Windows' auto-elevation whitelist. Before launching, it reads:
+
+```
+HKCU\Software\Classes\ms-settings\shell\open\command
+```
+
+If that key exists with a `DelegateExecute` value (even empty), Windows auto-elevates and runs the key's default value — no UAC prompt. Because the key is in `HKCU`, any user can write it without elevated rights.
+
+The PowerShell command embedded in the stager:
+1. Downloads `implant.exe` to `C:\Users\Public\i.exe`
+2. Writes the registry key pointing to `i.exe`
+3. Starts `fodhelper.exe` — it auto-elevates and runs `i.exe` as Administrator
+4. Sleeps 3 seconds, then removes the registry key (cleanup)
+
+### Verifying elevation on the target
+
+Once the implant connects, run via `RUN_CMD`:
+
+```
+whoami /groups
+```
+
+Look for `Mandatory Label\High Mandatory Level` — confirms Administrator. Alternatively:
+
+```
+net session
+```
+
+Returns session info → Administrator. Returns `Access is denied` → not elevated.
 
 ---
 

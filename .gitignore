@@ -1,20 +1,24 @@
-# ── Environment / secrets ──────────────────────
-# Contains C2_HOST_IP — machine-specific and should never be committed
+# Environment / secrets
+# Contains C2_HOST_IP -- machine-specific and should never be committed
 .env
 
-# ── Generated shellcode artifacts ──────────────
+# Generated shellcode artifacts
+# shellcode-generation/ artifacts are built on the host with:
+#   make HOST_IP=<ip>  (in exfil-server/shellcode-generation/)
+# then committed so Docker COPY picks them up directly.
+# Rebuild whenever the HOST_IP changes.
 shellcode.bin
 exploit.js.bak
 
-# ── Compiled binaries ───────────────────────────
-# Docker rebuilds these from source — no need to track them
+# Compiled binaries
+# Docker rebuilds these from source -- no need to track them
 c2-server/C2-Server-and-Implant/bin/
 
-# ── Runtime exfil data ──────────────────────────
+# Runtime exfil data
 # Volume-mounted at runtime, not part of the project
 exfil-data/
 
-# ── OS / editor noise ───────────────────────────
+# OS / editor noise
 .DS_Store
 Thumbs.db
 *.swp

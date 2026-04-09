@@ -28,7 +28,6 @@ This lab implements a 2-container offensive pipeline:
 / (workspace root)
 ├── docker-compose.yml          # Starts c2-server + exfil-server on custom network
 ├── launch.sh                   # One-command setup: prompts for IP, builds + starts lab
-├── generate_shellcode.sh       # Standalone: updates IP in .env and rebuilds exfil-server
 ├── .gitignore                  # Excludes .env, compiled binaries, shellcode artifacts
 ├── README.md                   # This file
 ├── c2-server/
@@ -39,11 +38,16 @@ This lab implements a 2-container offensive pipeline:
 │       ├── Makefile            # Builds Linux + Windows binaries; accepts C2_HOST_IP= to bake IP in
 │       └── bin/                # Build output (gitignored — rebuilt by Docker)
 ├── exfil-server/
-│   ├── Dockerfile              # Multi-stage (Kali builder): runs msfvenom, compiles implant.exe, builds file server
-│   └── CVE-2021-21191---CVE-2021-21192/
-│       ├── index.html          # CVE exploit webpage
-│       ├── exploit.js          # Exploit script (shellcode patched by msfvenom at build time)
-│       └── server.js           # Node.js static file server (port 8888)
+│   ├── Dockerfile              # Multi-stage (Debian builder): patches shellcode into exploit.js, compiles implant.exe, builds file server
+│   ├── shellcode-generation/
+│   │   ├── src/stager.asm      # Flat x64 NASM shellcode — PEB walk → WinExec(powershell ...) — runs in-place on RWX WASM page
+│   │   ├── bin/                # Build output: stager_patched.asm, final_shellcode.bin (pre-built by launch.sh)
+│   │   └── Makefile            # Substitutes HOST_IP into stager.asm, assembles with nasm; accepts HOST_IP=
+│   ├── exploit-contents/
+│   │   ├── index.html          # CVE exploit webpage
+│   │   ├── exploit.js          # Exploit script (shellcode array patched at Docker build time)
+│   │   └── server.js           # Node.js static file server (port 8888)
+│   └── web-server/             # Stealth HTTPS file server (nginx header masking, TLS)
 └── exfil-data/                 # Persisted volume for exfiltrated files (gitignored)
 ```
 
@@ -66,8 +70,11 @@ Controller reads `C2_PORT` from the environment at startup to determine which po
 
 ### exfil-server
 - Docker image: `docker-exfil-server`
-- Build: **multi-stage** using Kali Linux as the builder
-  - Stage 1 (`builder`): runs `msfvenom` to generate shellcode and patch `exploit.js`, then compiles `implant.exe` from source with host IP baked in
+- Build: **multi-stage** using Debian as the builder
+  - Stage 1 (`builder`):
+    1. Copies pre-built `final_shellcode.bin` (assembled by `launch.sh` before Docker runs)
+    2. Patches the shellcode uint32 array into `exploit.js`
+    3. Compiles `implant.exe` from source with C2 host IP baked in
   - Stage 2: installs `nodejs`, `npm`, Python; copies compiled `implant.exe` and patched exploit site
 - Runs:
   - Node.js exploit site on port `8888`
@@ -130,7 +137,8 @@ sudo ./launch.sh
 3. Prompt for your host IP — auto-fills with `vboxnet0` if detected, creates `.env` automatically
 4. Stop any existing lab containers
 5. Check for port conflicts on 4444, 8000, 8888
-6. Run `docker compose up --build -d` — msfvenom runs inside the Docker build to generate shellcode and patch `exploit.js`
+6. Build shellcode locally: `make HOST_IP=<ip>` in `shellcode-generation/` assembles `final_shellcode.bin` from `stager.asm`
+7. Run `docker compose up --build -d` — Docker copies the pre-built shellcode and patches it into `exploit.js`
 7. Verify both containers are running and print a summary
 
 ### Other useful commands
@@ -158,8 +166,8 @@ sudo docker attach c2-server
 # Stop everything
 sudo docker compose down
 
-# Regenerate shellcode only (e.g. if IP changed)
-sudo ./generate_shellcode.sh
+# Regenerate shellcode with a new IP (updates .env and rebuilds exfil-server only)
+sudo ./launch.sh
 ```
 
 ---
@@ -303,7 +311,22 @@ Select a command:
 
 **Problem:** Shellcode generation required `msfvenom` to be installed on the host. The Metasploit apt repo does not support Ubuntu 24.04 (Noble) and Rapid7's installer does not support Debian bookworm, making setup fragile and host-dependent.
 
-**Fix:** Moved `msfvenom` entirely inside the Docker build. The builder stage now uses `kalilinux/kali-rolling` as its base, which has `metasploit-framework` in its native repos. Shellcode is generated and `exploit.js` is patched automatically during `docker compose up --build`. No host installation of msfvenom is required.
+**Fix (initial):** Moved `msfvenom` inside Docker using `kalilinux/kali-rolling` as the builder base. Shellcode was generated and `exploit.js` patched automatically during `docker compose up --build`.
+
+---
+
+### Bug 8 — Donut shellcode replaced with flat NASM stager
+
+**Files:** `exfil-server/shellcode-generation/src/stager.asm`, `exfil-server/shellcode-generation/Makefile`, `exfil-server/Dockerfile`
+
+**Problem:** Donut-generated shellcode (and the custom `loader.c` → Donut pipeline before it) requires `VirtualAlloc(PAGE_EXECUTE_READWRITE)` at runtime to unpack a PE into memory. Chrome's renderer sandbox blocks all `VirtualAlloc` calls with executable flags — the allocation returns `NULL` and execution faults immediately with `STATUS_ACCESS_VIOLATION`. This applies to any Donut-wrapped binary, including a Donut-wrapped injector that tries to inject into another process: Donut itself needs executable memory before it can do anything.
+
+**Fix:** Replaced the entire Donut pipeline with a single flat x64 NASM shellcode (`stager.asm`, ~300 bytes). It runs entirely in-place on the RWX WASM page the exploit already owns:
+1. Walks the PEB (`GS:[0x60]`) to find `kernel32.dll` base without any imports
+2. Parses the PE export table to resolve `WinExec`
+3. Calls `WinExec` with an embedded PowerShell command that downloads and runs `implant.exe`
+
+PowerShell runs as an unsandboxed process and handles the download — no new executable memory needed inside the renderer. The stager is pre-assembled locally by `launch.sh` (`make HOST_IP=<ip>`) before Docker builds, so the Dockerfile simply copies `final_shellcode.bin` and patches it into `exploit.js`.
 
 ---
 

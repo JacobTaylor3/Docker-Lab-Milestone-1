@@ -36,7 +36,17 @@ if ! docker compose version &>/dev/null; then
     exit 1
 fi
 
-echo -e "${GREEN}[+] Docker and Docker Compose found.${NC}"
+if ! command -v make &>/dev/null; then
+    echo -e "${RED}[!] make is not installed. Install it with: sudo apt install build-essential${NC}"
+    exit 1
+fi
+
+if ! command -v x86_64-w64-mingw32-gcc &>/dev/null; then
+    echo -e "${RED}[!] mingw-w64 not found. Install it with: sudo apt install gcc-mingw-w64-x86-64${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}[+] Docker, Docker Compose, make, and mingw-w64 found.${NC}"
 
 # ── 2. Detect available host IPs ─────────────
 echo ""
@@ -105,10 +115,23 @@ EOF
 
 echo -e "${GREEN}[+] .env written.${NC}"
 
-# ── 4. Shellcode generation ───────────────────
+# ── 4. Build shellcode locally ────────────────
+SHELLCODE_DIR="$SCRIPT_DIR/exfil-server/shellcode-generation"
 echo ""
-echo -e "${GREEN}[+] Shellcode will be generated inside the Docker build:${NC}"
-echo -e "    loader.c → loader.exe (mingw-w64) → loader.bin (Donut) → patched into exploit.js"
+echo -e "${YELLOW}[*] Building two-stage shellcode with HOST_IP=${HOST_IP}...${NC}"
+
+if ! make -C "$SHELLCODE_DIR" clean 2>&1 | sed 's/^/    /'; then
+    echo -e "${RED}[!] Shellcode clean failed.${NC}"
+    exit 1
+fi
+
+if ! make -C "$SHELLCODE_DIR" HOST_IP="$HOST_IP" 2>&1 | sed 's/^/    /'; then
+    echo -e "${RED}[!] Shellcode build failed. Check output above.${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}[+] Shellcode built successfully:${NC}"
+echo -e "    final_shellcode.bin → $(ls -lh "$SHELLCODE_DIR/bin/final_shellcode.bin" | awk '{print $5}')"
 
 # ── 5. Stop any existing lab containers ───────
 echo ""

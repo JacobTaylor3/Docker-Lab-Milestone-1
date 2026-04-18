@@ -19,10 +19,10 @@ services:
     stdin_open: true             # Keep stdin open for docker attach
     tty: true                    # Allocate a TTY so the controller menu works
     ports:
-      - "4444:4444"              # C2 listener (mTLS TCP) → host
+      - "443:443"                # C2 listener (mTLS TCP) — port 443 blends with HTTPS traffic
     environment:
       - C2_HOST=0.0.0.0
-      - C2_PORT=4444
+      - C2_PORT=443
       # BP2: single-use enrollment token — validated when implant presents CSR
       - ENROLLMENT_TOKEN=${ENROLLMENT_TOKEN}
     networks:
@@ -40,7 +40,7 @@ services:
     container_name: exfil-server
     hostname: exfil-server
     ports:
-      - "443:443"                # nginx HTTPS implant delivery → host (Section 9)
+      - "8443:443"               # nginx HTTPS implant delivery → host (one-time download)
       - "8888:8888"              # CVE exploit webpage → host
       # Port 8000 removed — Python http.server replaced by nginx + token_server
     environment:

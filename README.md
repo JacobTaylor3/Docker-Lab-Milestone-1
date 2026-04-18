@@ -34,11 +34,11 @@ The victim browses to a hosted webpage. The exploit initiates via shellcode embe
 │       ├── src/
 │       │   ├── controller.c        # C2 server: TLS accept, enrollment handling, whitelist check, command dispatch
 │       │   ├── implant.c           # Windows implant: BP2 enrollment, mTLS connect, keepalive thread, command handlers
-│       │   ├── spyware.c           # Implant: Modular keylogger, screenshot capture, and clipboard exfiltration
+│       │   ├── spyware.c           # Implant: Modular keylogger, screenshot capture, and browser exfiltration
 │       │   ├── spyware_controller.c # Controller: Handlers for saving exfiltrated spyware data
 │       │   ├── protocol.c          # Packet framing: SSL_write/SSL_read, 512-byte secure padding
 │       │   ├── tls.c               # All OpenSSL logic: contexts, enrollment, CSR signing, whitelist check
-│       │   ├── implant_utils.c     # secure_jitter_sec(), read_file_heap_plain() — utility functions
+│       │   ├── implant_utils.c     # secure_jitter_sec(), file exfil utilities (DPAPI + plain)
 │       │   └── controller_utils.c  # flush_stdin()
 │       └── include/
 │           ├── spyware.h           # Declarations for implant-side spyware features
@@ -46,7 +46,7 @@ The victim browses to a hosted webpage. The exploit initiates via shellcode embe
 │           ├── tls.h               # Conn struct + full TLS API (init, wrap, enroll, sign, whitelist)
 │           ├── protocol.h          # Packet struct, Command enum (ENROLL_CSR, ENROLL_CERT, SCREENSHOT, etc.)
 │           ├── platform.h          # SLEEP, CLOSE_SOCKET, hidden_popen (CREATE_NO_WINDOW), secure_random, threading
-│           ├── implant_utils.h     # secure_jitter_sec() declaration
+│           ├── implant_utils.h     # Shared file utility declarations
 │           ├── implant_certs.h     # Generated: CA cert only as C byte array (implant cert/key issued at runtime)
 │           └── controller_utils.h  # flush_stdin() declaration
 │
@@ -64,7 +64,11 @@ The victim browses to a hosted webpage. The exploit initiates via shellcode embe
 │   └── web-server/
 │       └── nginx.conf              # TLS 1.2+1.3 on port 443; access_log → stdout; proxies /update/ to token_server
 │
-└── exfil-data/                     # Persisted volume for exfiltrated files (screenshots, keylogs, data)
+├── utils-scripts/                  # Post-exfiltration analysis tools
+│   ├── decrypt_creds.py            # Decrypts exfiltrated Edge/Chrome Master Keys and Login Data
+│   └── read_history.py             # Parses exfiltrated Edge/Chrome History SQLite databases
+│
+└── exfil-data/                     # Persisted volume for exfiltrated files (screenshots, keylogs, databases)
 ```
 
 > `.env` and `certs/` are **never committed** — both are created fresh by `launch.sh` on every run.
@@ -341,7 +345,7 @@ Even with mTLS, a network observer can do **traffic analysis** — inferring ope
 - On enrollment connection (no client cert): validates CSR → signs cert → writes serial to whitelist → burns token
 - On normal mTLS connection: verifies cert chain → whitelist check → HELLO → command loop
 - Exposed port: `443` (TCP, TLS 1.3 — blends with normal HTTPS traffic)
-- **Persistent exfil volume:** mounted at `/opt/c2/exfil-data` to save screenshots and keylogs.
+- **Persistent exfil volume:** mounted at `/opt/c2/exfil-data` to save screenshots, keylogs, and browser data.
 
 ### exfil-server
 
@@ -405,6 +409,8 @@ Select a command:
  10 - KEYLOG_START               Start keylogger
  11 - KEYLOG_STOP                Stop keylogger
  12 - KEYLOG_DUMP                Dump keylog
+ 13 - CRED_STEAL                 Harvest browser credentials
+ 14 - HISTORY_STEAL              Harvest browser history
 ```
 
 | Command | What happens |
@@ -421,6 +427,39 @@ Select a command:
 | KEYLOG_START | Starts background keylogger thread (GetAsyncKeyState polling) |
 | KEYLOG_STOP | Stops the keylogger thread |
 | KEYLOG_DUMP | Retrieves recorded keystrokes; saved to `exfil-data/keylog_<time>.txt` |
+| CRED_STEAL | Decrypts Edge/Chrome Master Key, copies Login Data; saved to `exfil-data/` |
+| HISTORY_STEAL | Copies Edge/Chrome History database; saved to `exfil-data/` |
+
+---
+
+## 🛠 Advanced Spyware & Remote Access (Roadmap)
+
+The project is architected for modular expansion. Planned features include:
+* **Remote Input Control:** Controlling the victim's mouse and keyboard via `SendInput`.
+* **Media Surveillance:** Activating the camera and microphone for live exfiltration.
+* **Defensive Evasion:** Automated disabling of Windows Defender and anti-sandbox checks.
+* **WiFi Harvesting:** Stealing saved network passwords.
+
+See `spyware.md` for the full technical roadmap.
+
+---
+
+## Post-Exfiltration Analysis
+
+Captured browser data can be analyzed using the scripts in `utils-scripts/`.
+
+### 1. Decrypt Credentials
+Decrypts saved passwords from exfiltrated `Login Data` and `master.key` files. Requires `pycryptodome`.
+```bash
+pip install pycryptodome
+python3 utils-scripts/decrypt_creds.py
+```
+
+### 2. Read Browsing History
+Parses exfiltrated `History` SQLite databases and displays recent activity with readable timestamps.
+```bash
+python3 utils-scripts/read_history.py
+```
 
 ---
 
@@ -472,3 +511,6 @@ sudo docker exec -it exfil-server /bin/bash
 | 18 | `controller.c`, `spyware_controller.c` | Monolithic controller code | Refactored exfil handlers into modular `spyware_controller.c` |
 | 19 | `docker-compose.yml` | Screenshots not persisted | Added `exfil-data` volume mount to `c2-server` |
 | 20 | `Makefile` | Missing library links | Added `-lgdi32 -luser32` for screenshot and keylogger support |
+| 21 | `decrypt_creds.py`, `read_history.py` | Data analysis overhead | Added automated scripts to decrypt passwords and parse history |
+| 22 | `spyware.c` | Compilation error | Fixed `#ifdef` logic and header include order in modular spyware source |
+| 23 | `spyware.c` | Limited browser support | Expanded `CRED_STEAL` and `HISTORY_STEAL` to target both Edge and Chrome |

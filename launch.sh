@@ -196,10 +196,10 @@ echo -e "${GREEN}[+] Ready to rebuild.${NC}"
 
 # ── 6. Check for port conflicts ───────────────
 echo ""
-echo -e "${YELLOW}[*] Checking for port conflicts (4444, 443, 8888)...${NC}"
+echo -e "${YELLOW}[*] Checking for port conflicts (443, 8443, 8888)...${NC}"
 
 CONFLICT=0
-for PORT in 4444 443 8888; do
+for PORT in 443 8443 8888; do
     if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
         echo -e "${RED}[!] Port $PORT is already in use.${NC}"
         CONFLICT=1
@@ -246,14 +246,14 @@ echo -e "${CYAN}================================================${NC}"
 echo -e "${CYAN}                    Summary                     ${NC}"
 echo -e "${CYAN}================================================${NC}"
 echo ""
-echo -e "  C2 listener (mTLS)  → ${GREEN}localhost:4444${NC}  (TLS 1.3)"
+echo -e "  C2 listener (mTLS)  → ${GREEN}localhost:443${NC}   (TLS 1.3, blends with HTTPS)"
 echo -e "  Exploit webpage     → ${GREEN}http://localhost:8888${NC}"
-echo -e "  Implant delivery    → ${GREEN}https://localhost:443/update/<token>${NC}  (HTTPS, single-use)"
+echo -e "  Implant delivery    → ${GREEN}https://localhost:8443/update/<token>${NC}  (HTTPS, single-use)"
 echo ""
 echo -e "  From Windows VM:"
 echo -e "  Exploit webpage  → ${GREEN}http://${HOST_IP}:8888${NC}"
-echo -e "  Download implant → ${GREEN}https://${HOST_IP}/update/${DOWNLOAD_TOKEN}${NC}  (in shellcode)"
-echo -e "  C2 connects to   → ${GREEN}${HOST_IP}:4444${NC}  (baked into implant.exe)"
+echo -e "  Download implant → ${GREEN}https://${HOST_IP}:8443/update/${DOWNLOAD_TOKEN}${NC}  (in shellcode)"
+echo -e "  C2 connects to   → ${GREEN}${HOST_IP}:443${NC}   (baked into implant.exe)"
 echo ""
 echo -e "  Attach to C2 controller:"
 echo -e "    ${CYAN}sudo docker attach c2-server${NC}"

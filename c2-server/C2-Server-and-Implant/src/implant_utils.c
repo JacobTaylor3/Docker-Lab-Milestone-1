@@ -55,3 +55,81 @@ int secure_jitter_sec(int base_sec, int range_sec)
     int result  = base_sec + offset;
     return result < 1 ? 1 : result;          /* floor at 1 second */
 }
+
+char *read_file_heap_plain(const char *path, int *len_out)
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    rewind(fp);
+    if (sz <= 0) { fclose(fp); return NULL; }
+    char *buf = malloc((size_t)sz);
+    if (!buf)  { fclose(fp); return NULL; }
+    if ((long)fread(buf, 1, (size_t)sz, fp) != sz)
+        { fclose(fp); free(buf); return NULL; }
+    fclose(fp);
+    *len_out = (int)sz;
+    return buf;
+}
+
+char *read_file_heap(const char *path, int *len_out)
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    rewind(fp);
+    if (sz <= 0) { fclose(fp); return NULL; }
+    unsigned char *buf = malloc((size_t)sz);
+    if (!buf)  { fclose(fp); return NULL; }
+    if ((long)fread(buf, 1, (size_t)sz, fp) != sz)
+        { fclose(fp); free(buf); return NULL; }
+    fclose(fp);
+
+#ifdef _WIN32
+    DATA_BLOB bin, out;
+    bin.pbData = buf;
+    bin.cbData = (DWORD)sz;
+    if (CryptUnprotectData(&bin, NULL, NULL, NULL, NULL, 0, &out)) {
+        free(buf);
+        *len_out = (int)out.cbData;
+        return (char *)out.pbData;
+    }
+    free(buf);
+    return NULL;
+#else
+    *len_out = (int)sz;
+    return (char *)buf;
+#endif
+}
+
+void write_file_safe(const char *path, const char *data, int len)
+{
+#ifdef _WIN32
+    /* Ensure parent directory exists */
+    char dir[512];
+    strncpy(dir, path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    char *sep = strrchr(dir, '\\');
+    if (sep) { *sep = '\0'; CreateDirectoryA(dir, NULL); }
+
+    DATA_BLOB bin, out;
+    bin.pbData = (BYTE *)data;
+    bin.cbData = (DWORD)len;
+    if (!CryptProtectData(&bin, L"implant-cred", NULL, NULL, NULL, 0, &out))
+        return;
+    data = (const char *)out.pbData;
+    len  = (int)out.cbData;
+#endif
+
+    FILE *fp = fopen(path, "wb");
+    if (fp) {
+        fwrite(data, 1, (size_t)len, fp);
+        fclose(fp);
+    }
+
+#ifdef _WIN32
+    LocalFree((HLOCAL)out.pbData);
+#endif
+}

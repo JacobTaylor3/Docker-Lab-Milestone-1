@@ -20,6 +20,8 @@ services:
     tty: true                    # Allocate a TTY so the controller menu works
     ports:
       - "443:443"                # C2 listener (mTLS TCP) — port 443 blends with HTTPS traffic
+    volumes:
+      - ./exfil-data:/opt/c2/exfil-data
     environment:
       - C2_HOST=0.0.0.0
       - C2_PORT=443

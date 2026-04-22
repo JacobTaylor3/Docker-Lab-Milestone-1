@@ -39,6 +39,7 @@ services:
       args:
         - C2_HOST_IP=${C2_HOST_IP}
         - ENROLLMENT_TOKEN=${ENROLLMENT_TOKEN}
+        - DOWNLOAD_TOKEN=${DOWNLOAD_TOKEN}
     container_name: exfil-server
     hostname: exfil-server
     ports:

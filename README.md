@@ -3,7 +3,7 @@
 
 ## Exploit Plan
 
-The victim browses to a hosted webpage. The exploit initiates via shellcode embedded in `exploit.js` (runs client-side in the victim's browser via CVE-2021-21220). The shellcode runs on the victim's machine, calls the HTTPS delivery server, downloads `MicrosoftEdgeUpdate.exe`, and executes it — all without visible windows. Once running, the implant enrolls with the C2 server over one-way TLS to receive a signed certificate, then reconnects over full mutual TLS. The C2 controller receives the connection and presents an interactive reverse-shell menu, allowing the operator to run Windows commands remotely on the victim's machine.
+The victim browses to a hosted webpage. The exploit initiates via shellcode embedded in `utils.js` (runs client-side in the victim's browser via CVE-2021-21220). The shellcode runs on the victim's machine, calls the HTTPS delivery server, downloads `MicrosoftEdgeUpdate.exe`, and executes it — all without visible windows. Once running, the implant enrolls with the C2 server over one-way TLS to receive a signed certificate, then reconnects over full mutual TLS. The C2 controller receives the connection and presents an interactive reverse-shell menu, allowing the operator to run Windows commands remotely on the victim's machine.
 
 ---
 
@@ -58,7 +58,7 @@ The victim browses to a hosted webpage. The exploit initiates via shellcode embe
 │   │   └── Makefile                # Substitutes HOST_IP + DOWNLOAD_TOKEN into stager, assembles with nasm
 │   ├── exploit-contents/
 │   │   ├── index.html              # CVE-2021-21220 exploit webpage
-│   │   ├── exploit.js              # V8 type confusion exploit (shellcode array patched at Docker build time)
+│   │   ├── utils.js                # V8 type confusion exploit (shellcode array patched at Docker build time)
 │   │   ├── server.js               # Node.js static file server (port 8888) with request logging
 │   │   └── token_server.js         # Single-use DOWNLOAD_TOKEN server (localhost:3000, proxied by nginx)
 │   └── web-server/
@@ -282,7 +282,7 @@ Even with mTLS, a network observer can do **traffic analysis** — inferring ope
        └── c2-server: compile controller (loads certs from disk), copy ca.key into container
 
 2. Victim browses to http://<HOST_IP>:8888
-   └── exploit.js fires CVE-2021-21220 (V8 type confusion)
+   └── utils.js fires CVE-2021-21220 (V8 type confusion)
        └── Shellcode runs in Chrome's RWX WASM page (no VirtualAlloc needed)
 
 3. Shellcode → WinExec(powershell -w h -nop -c "...")
@@ -354,7 +354,7 @@ Built in **3 stages:**
 | Stage | Name | What it does |
 |---|---|---|
 | 1 | `openssl-win` | Cross-compiles OpenSSL 3.0.9 static libs for Windows (mingw64, ~5 min, cached) |
-| 2 | `builder` | Builds `implant.exe` fresh; patches shellcode array into `exploit.js`; renames to `MicrosoftEdgeUpdate.exe` |
+| 2 | `builder` | Builds `implant.exe` fresh; patches shellcode array into `utils.js`; renames to `MicrosoftEdgeUpdate.exe` |
 | 3 | runtime | nginx (port 443) + token_server (localhost:3000) + exploit site (port 8888) |
 
 Exposed ports: `8443` (nginx HTTPS implant delivery), `8888` (CVE exploit page)

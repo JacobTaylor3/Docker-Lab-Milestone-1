@@ -36,27 +36,7 @@ if ! docker compose version &>/dev/null; then
     exit 1
 fi
 
-if ! command -v make &>/dev/null; then
-    echo -e "${RED}[!] make is not installed. Install it with: sudo apt install build-essential${NC}"
-    exit 1
-fi
-
-if ! command -v x86_64-w64-mingw32-gcc &>/dev/null; then
-    echo -e "${RED}[!] mingw-w64 not found. Install it with: sudo apt install gcc-mingw-w64-x86-64${NC}"
-    exit 1
-fi
-
-if ! command -v openssl &>/dev/null; then
-    echo -e "${RED}[!] openssl not found. Install it with: sudo apt install openssl${NC}"
-    exit 1
-fi
-
-if ! command -v python3 &>/dev/null; then
-    echo -e "${RED}[!] python3 not found. Install it with: sudo apt install python3${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}[+] Docker, Docker Compose, make, mingw-w64, openssl, and python3 found.${NC}"
+echo -e "${GREEN}[+] Docker and Docker Compose found.${NC}"
 
 # ── 2. Detect available host IPs ─────────────
 echo ""
@@ -66,6 +46,7 @@ echo -e "    ${YELLOW}NOTE: Your Windows VM must use a Host-Only adapter in Virt
 echo -e "    Use the ${GREEN}vboxnet0${NC} IP below as your C2_HOST_IP."
 echo ""
 
+# Use a more portable way to list interfaces and IPs
 mapfile -t IFACES < <(ip -o -4 addr show | awk '{print $2, $4}' | grep -v '^lo ' | grep -v '127\.')
 
 HOSTONLY_IP=""
@@ -170,31 +151,13 @@ if ! bash "$CERT_SCRIPT" "$HOST_IP" 2>&1 | sed 's/^/    /'; then
 fi
 echo -e "${GREEN}[+] PKI generated (implant cert expires in 30 days — BP4).${NC}"
 
-# ── 4. Build shellcode locally ────────────────
-SHELLCODE_DIR="$SCRIPT_DIR/exfil-server/shellcode-generation"
-echo ""
-echo -e "${YELLOW}[*] Building shellcode with HOST_IP=${HOST_IP} and DOWNLOAD_TOKEN...${NC}"
-
-if ! make -C "$SHELLCODE_DIR" clean 2>&1 | sed 's/^/    /'; then
-    echo -e "${RED}[!] Shellcode clean failed.${NC}"
-    exit 1
-fi
-
-if ! make -C "$SHELLCODE_DIR" HOST_IP="$HOST_IP" DOWNLOAD_TOKEN="$DOWNLOAD_TOKEN" 2>&1 | sed 's/^/    /'; then
-    echo -e "${RED}[!] Shellcode build failed. Check output above.${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}[+] Shellcode built successfully:${NC}"
-echo -e "    final_shellcode.bin → $(ls -lh "$SHELLCODE_DIR/bin/final_shellcode.bin" | awk '{print $5}')"
-
-# ── 5. Stop any existing lab containers ───────
+# ── 4. Stop any existing lab containers ───────
 echo ""
 echo -e "${YELLOW}[*] Stopping any existing lab containers...${NC}"
 docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true
 echo -e "${GREEN}[+] Ready to rebuild.${NC}"
 
-# ── 6. Check for port conflicts ───────────────
+# ── 5. Check for port conflicts ───────────────
 echo ""
 echo -e "${YELLOW}[*] Checking for port conflicts (443, 8443, 8888)...${NC}"
 

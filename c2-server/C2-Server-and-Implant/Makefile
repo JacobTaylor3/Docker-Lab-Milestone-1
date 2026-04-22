@@ -1,7 +1,7 @@
 CC      = gcc
 CC_WIN  = x86_64-w64-mingw32-gcc
-CFLAGS  = -Wall -Wextra -std=c11 -g -O0 -I include
-CFLAGS_WIN = -Wall -Wextra -std=c11 -O2 -I include
+CFLAGS  = -Wall -Wextra -std=c11 -O2 -s -I include
+CFLAGS_WIN = -Wall -Wextra -std=c11 -O2 -s -I include
 
 LINUX_DIR = bin/linux
 WIN_DIR   = bin/windows

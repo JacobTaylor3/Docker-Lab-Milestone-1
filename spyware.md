@@ -74,3 +74,11 @@ This document tracks the implemented spyware capabilities and outlines future fe
 *   **Keyboard Injection (`COMMAND_KEY_TAP`):**
     *   Use `SendInput` to simulate keystrokes, allowing for remote "typing" into the victim's active windows.
 
+
+
+## Phishing Website
+*  Plan B: if the exploit fails, steal the user creditial when they try to log in.
+
+
+## Bug
+* When the user attachs to the c2 after the exploit fires, not before. The c2 commands do no show up immedtialty, I believe they are buffered. To get it to show again you need to refresh the page and fire the exploit again, we should be able to attach before and after the exploit fires and not have issue.

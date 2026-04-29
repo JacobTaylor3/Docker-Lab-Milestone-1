@@ -398,11 +398,13 @@ The controller now manages up to 8 simultaneous implant sessions. A background a
 When you attach to the container (`sudo docker attach c2-server`) you see the live implant list:
 
 ```
-+--------------------------------------------+
-| C2 Controller — Connected Implants         |
-+--------------------------------------------+
-  [1] 192.168.1.50    Windows 10 Pro 19045      PERSIST:OFF
-  [2] 192.168.1.75    Windows 11 Home 22631     PERSIST:ON
++------------------------------------------------------------------+
+| C2 Controller — Connected Implants                               |
++------------------------------------------------------------------+
+  ID    IP Address        OS | Hostname             Persistence
+  ----  ----------------  ----------------------------  -----------
+  [1]   192.168.1.50      Windows 10.0 | DESKTOP-A1B2  DISABLED
+  [2]   192.168.1.75      Windows 10.0 | DESKTOP-C3D4  ENABLED
   [0] Refresh
 Select implant>
 ```

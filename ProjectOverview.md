@@ -68,7 +68,8 @@ The victim browses to a hosted webpage. The exploit initiates via shellcode embe
 │   ├── decrypt_creds.py            # Decrypts exfiltrated Edge/Chrome Master Keys and Login Data
 │   └── read_history.py             # Parses exfiltrated Edge/Chrome History SQLite databases
 │
-└── exfil-data/                     # Persisted volume for exfiltrated files (screenshots, keylogs, databases)
+└── exfil-data/                     # Persisted volume — one sub-folder per implant: exfil-data/<hostname>-<ip>/
+    └── <hostname>-<ip>/            # Created automatically on first command; contains screenshots, keylogs, databases
 ```
 
 > `.env` and `certs/` are **never committed** — both are created fresh by `launch.sh` on every run.
@@ -345,7 +346,7 @@ Even with mTLS, a network observer can do **traffic analysis** — inferring ope
 - On enrollment connection (no client cert): validates CSR → signs cert → writes serial to whitelist → burns token
 - On normal mTLS connection: verifies cert chain → whitelist check → HELLO → command loop
 - Exposed port: `443` (TCP, TLS 1.3 — blends with normal HTTPS traffic)
-- **Persistent exfil volume:** mounted at `/opt/c2/exfil-data` to save screenshots, keylogs, and browser data.
+- **Persistent exfil volume:** mounted at `/opt/c2/exfil-data`; each implant's data is isolated in its own sub-folder `exfil-data/<hostname>-<ip>/` created automatically on first interaction.
 
 ### exfil-server
 
@@ -542,3 +543,7 @@ sudo docker exec -it exfil-server /bin/bash
 | 24 | `controller.c` | Single-implant limitation | Rewrote controller with background `acceptor_thread` and `Session` table (up to 8 slots); operator selects implant by number from a live session list; each implant is fully independent |
 | 25 | `controller.c` | C2 output buffered on `docker attach` | Added `setvbuf(stdout, NULL, _IONBF, 0)` at startup — stdout is fully unbuffered so the session list and prompts appear immediately regardless of when the operator attaches |
 | 26 | `token_server.js` | Single-use download token blocked N-victim delivery | Removed burn-after-first-use logic; `DOWNLOAD_TOKEN` now authenticates any number of downloads so multiple victims can retrieve the implant from the same running server |
+| 27 | `implant_utils.c` | Session list missing hostname | Added `GetComputerNameA` call on Windows so the HELLO payload includes the machine hostname; session list now shows `OS version \| Hostname` and `IP Address` as labeled columns |
+| 28 | `controller.c` | Acceptor thread debug output polluted operator terminal | Removed all stdout prints from `acceptor_thread`; it now runs fully silently — new implants appear in the session list on next refresh with no interleaved noise |
+| 29 | `controller.c` | BACK closed the implant connection and caused a phantom reconnect | Added `back` flag to `run_command_loop`; session slot and TLS connection are only freed on a real disconnect (SET_SLEEP, SHUTDOWN, dropped connection) — BACK returns to the list with the session still live |
+| 30 | `spyware_controller.c`, `spyware_controller.h`, `controller.c` | All implants wrote exfil files into the same flat directory | Each session now saves to `exfil-data/<hostname>-<ip>/`; directory is created on first command loop entry via `ensure_save_dir()`; all four handlers (screenshot, keylog, cred, history) write into the per-implant folder |

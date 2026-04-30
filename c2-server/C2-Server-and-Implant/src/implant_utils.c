@@ -14,9 +14,15 @@ char *operating_system_info(void)
     OSVERSIONINFO version;
     version.dwOSVersionInfoSize = sizeof(OSVERSIONINFO);
     GetVersionEx(&version);
-    snprintf(os_info, 512, "Windows | %lu.%lu",
+
+    char hostname[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+    DWORD hostname_len = sizeof(hostname);
+    GetComputerNameA(hostname, &hostname_len);
+
+    snprintf(os_info, 512, "Windows %lu.%lu | %s",
              version.dwMajorVersion,
-             version.dwMinorVersion);
+             version.dwMinorVersion,
+             hostname);
 
 #elif __linux__ || __APPLE__
 #include <sys/utsname.h>

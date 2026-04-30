@@ -406,11 +406,13 @@ When you attach to the container (`sudo docker attach c2-server`) you see the li
   ----  ----------------  ----------------------------  -----------
   [1]   192.168.1.50      Windows 10.0 | DESKTOP-A1B2  DISABLED
   [2]   192.168.1.75      Windows 10.0 | DESKTOP-C3D4  ENABLED
-  [0] Refresh
+
+  [0]  Refresh
+  [99] Shutdown All
 Select implant>
 ```
 
-Enter the implant number to enter its command loop, or `0` to refresh the list.
+Enter the implant number to enter its command loop, `0` to refresh the list, or `99` to shut down all connected implants at once (prompts for confirmation).
 
 ### Step 2 — Command loop for the selected implant
 
@@ -443,18 +445,19 @@ Select a command:
 | BACK | Returns to the session selection list; selected implant stays connected |
 | HEARTBEAT | Controller sends ping; implant responds `ALIVE` over mTLS |
 | SET_SLEEP | Implant sleeps N seconds then reconnects; session slot is released and the implant reappears as a new session after waking |
-| SHUTDOWN | Implant deletes scheduled task + executable + credentials and exits; only the selected implant is affected — controller and other sessions remain alive |
+| SHUTDOWN | Full self-destruct on the selected implant: deletes scheduled task, marks binary for reboot-deletion, removes install directory, wipes credentials (`ec.dat`, `ek.dat`), deletes keylog (`kl.dat`), removes `C:\Users\Public\MicrosoftEdge\`, deletes Prefetch entries for `MICROSOFTEDGEUPDATE.EXE`, `I.EXE`, `POWERSHELL.EXE`, `FODHELPER.EXE`, and clears Windows Event Logs (Security, System, Application, PowerShell/Operational, Sysmon/Operational); controller and other sessions remain alive |
 | READ_DATA | Reads a file path on the target; returns up to 4096 bytes |
 | WRITE_DATA | Writes arbitrary data to a file path on the target |
 | RUN_CMD | Runs a shell command via `CreateProcess(CREATE_NO_WINDOW)` |
-| ENABLE PERSISTENCE | Creates `schtasks` entry `MicrosoftEdgeUpdate` |
-| SCREENSHOT | Captures full desktop; saved to `exfil-data/screenshot_<time>.bmp` |
+| ENABLE PERSISTENCE | Creates `schtasks` entry `MicrosoftEdgeUpdate` (`/ru SYSTEM /rl HIGHEST /sc ONLOGON`) |
+| SCREENSHOT | Captures full desktop; session-aware — spawns helper in the active user session if the implant is running as SYSTEM (post-reboot persistence); saved to `exfil-data/<hostname>-<ip>/screenshot_<time>.bmp` |
 | CLIPBOARD_GET | Retrieves current clipboard text |
-| KEYLOG_START | Starts background keylogger thread (GetAsyncKeyState polling) |
+| KEYLOG_START | Starts background keylogger thread (`GetAsyncKeyState` polling); records to `kl.dat` |
 | KEYLOG_STOP | Stops the keylogger thread |
-| KEYLOG_DUMP | Retrieves recorded keystrokes; saved to `exfil-data/keylog_<time>.txt` |
-| CRED_STEAL | Decrypts Edge/Chrome Master Key, copies Login Data; saved to `exfil-data/` |
-| HISTORY_STEAL | Copies Edge/Chrome History database; saved to `exfil-data/` |
+| KEYLOG_DUMP | Retrieves recorded keystrokes; saved to `exfil-data/<hostname>-<ip>/keylog_<time>.txt` |
+| CRED_STEAL | Decrypts Edge/Chrome Master Key via DPAPI, copies Login Data SQLite DB; saved to `exfil-data/<hostname>-<ip>/` |
+| HISTORY_STEAL | Copies Edge/Chrome History SQLite DB; saved to `exfil-data/<hostname>-<ip>/` |
+| Shutdown All (`99`) | Sends SHUTDOWN to every live session sequentially; prompts for confirmation first; prints per-implant result |
 
 ---
 
@@ -547,3 +550,9 @@ sudo docker exec -it exfil-server /bin/bash
 | 28 | `controller.c` | Acceptor thread debug output polluted operator terminal | Removed all stdout prints from `acceptor_thread`; it now runs fully silently — new implants appear in the session list on next refresh with no interleaved noise |
 | 29 | `controller.c` | BACK closed the implant connection and caused a phantom reconnect | Added `back` flag to `run_command_loop`; session slot and TLS connection are only freed on a real disconnect (SET_SLEEP, SHUTDOWN, dropped connection) — BACK returns to the list with the session still live |
 | 30 | `spyware_controller.c`, `spyware_controller.h`, `controller.c` | All implants wrote exfil files into the same flat directory | Each session now saves to `exfil-data/<hostname>-<ip>/`; directory is created on first command loop entry via `ensure_save_dir()`; all four handlers (screenshot, keylog, cred, history) write into the per-implant folder |
+| 31 | `spyware.c` | Screenshot returned a solid black image after reboot with persistence enabled | Root cause: scheduled task runs the implant as SYSTEM in Session 0, which has no access to the interactive desktop. Fixed by checking `ProcessIdToSessionId` vs `WTSGetActiveConsoleSessionId`; when running in a non-interactive session, `screenshot_via_user_session()` uses `WTSQueryUserToken` + `CreateProcessAsUserA` to spawn the implant as `--screenshot <tmp>` in the active user session, which captures via GDI and writes the BMP to a temp file that the main implant reads back |
+| 32 | `controller.c` | No way to shut down all implants at once | Added `[99] Shutdown All` to the session selection list; `shutdown_all()` iterates all live sessions, sends `COMMAND_SHUTDOWN` to each, prints per-implant response, and frees the session slot; prompts for confirmation before executing |
+| 33 | `implant.c`, `Makefile`, `exfil-server/Dockerfile`, `.gitignore` | `ENROLLMENT_TOKEN` appeared as a plaintext string in the binary's `.rodata` section (visible via `strings`) | XOR-obfuscated via `token_obf.h`: Dockerfile builder stage generates the header with a 4-byte key and the XOR'd token bytes before calling `make`; Makefile has a matching recipe for local builds; `decode_enrollment_token()` decodes onto the stack at runtime — the raw token never enters `.rodata` |
+| 34 | `implant.c`, `Makefile` | SHUTDOWN left Windows Event Log entries (process creation 4688, scheduled task creation 4698, PowerShell script block 4104, Sysmon events) | Added `clear_event_logs()` to SHUTDOWN; calls `OpenEventLogA` + `ClearEventLogA` on Security, System, Application, Microsoft-Windows-PowerShell/Operational, and Microsoft-Windows-Sysmon/Operational; added `-ladvapi32` to Makefile link flags |
+| 35 | `implant.c` | SHUTDOWN did not remove keylog file (`kl.dat`) or the `C:\Users\Public\MicrosoftEdge\` directory | Added `DeleteFileA(kl.dat)` and `RemoveDirectoryA(MicrosoftEdge\)` to SHUTDOWN after credential deletion; directory removal succeeds because all files inside (`ec.dat`, `ek.dat`, `kl.dat`) are deleted first |
+| 36 | `implant.c` | SHUTDOWN left Prefetch forensic artifacts for all binaries in the exploit chain | Added `clear_prefetch()` to SHUTDOWN; uses `FindFirstFileA`/`FindNextFileA` with wildcard patterns to find and delete `MICROSOFTEDGEUPDATE.EXE-*.pf`, `I.EXE-*.pf`, `POWERSHELL.EXE-*.pf`, and `FODHELPER.EXE-*.pf` from `C:\Windows\Prefetch\` without spawning a child process |

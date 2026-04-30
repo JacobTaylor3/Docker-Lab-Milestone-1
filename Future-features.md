@@ -1,3 +1,6 @@
+## Bug
+* When the user refresh the page, the expliot more than once, so there are mulitple implants connects to the C2 from the smae machine.
+* The commmand prompt windows on the the victim would appear split seconds on shutdown command.
 
 ---
 

@@ -15,8 +15,9 @@ certs/nginx.key
 certs/nginx.crt
 certs/whitelist.txt
 
-# Auto-generated C header — built from certs/ by generate_certs.sh
+# Auto-generated C headers — built at launch/docker-build time, never committed
 c2-server/C2-Server-and-Implant/include/implant_certs.h
+c2-server/C2-Server-and-Implant/include/token_obf.h
 
 # Generated shellcode artifacts
 # shellcode-generation/ artifacts are built on the host with:

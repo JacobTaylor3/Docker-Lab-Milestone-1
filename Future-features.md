@@ -4,9 +4,9 @@
 
 ---
 
-## C2 Traffic Redirector (Docker)
+## ✅ C2 Traffic Redirector (Docker) — IMPLEMENTED
 
-**Problem:** The implant currently connects directly to the `c2-server` container, meaning the C2 IP is both baked into the binary and exposed on the network. A single firewall rule or takedown kills the entire operation. The current Docker-only hop (operator → c2-server) is functional but thin.
+**Problem:** The implant previously connected directly to the `c2-server` container, meaning the C2 IP was both baked into the binary and exposed on the network. A single firewall rule or takedown would kill the entire operation.
 
 **Proposed Implementation — socat redirector container:**
 

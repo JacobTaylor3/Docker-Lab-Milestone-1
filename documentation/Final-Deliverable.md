@@ -54,15 +54,15 @@ Network throughput graph (Wireshark, pcap stats) shows low, burst-only traffic 2
 - **≥ 4 multi-step tasks:** SCREENSHOT (session-aware, SYSTEM→user helper), KEYLOG_START/STOP/DUMP, CRED_STEAL (DPAPI Master Key + SQLite), HISTORY_STEAL (Edge + Chrome)
 - **Arbitrary command execution:** `RUN_CMD` via `CreateProcess(CREATE_NO_WINDOW)` — output returned over mTLS
 - **Persistence:** `schtasks /ru SYSTEM /rl HIGHEST /sc ONLOGON` via ENABLE PERSISTENCE; survives reboot; DPAPI creds stored in `C:\Users\Public` (accessible from both user and SYSTEM contexts)
-- **Self-destruct (SHUTDOWN):** deletes scheduled task, marks binary for reboot-deletion via `MoveFileExA(MOVEFILE_DELAY_UNTIL_REBOOT)`, wipes `ec.dat` / `ek.dat` / `kl.dat`, removes `C:\Users\Public\MicrosoftEdge\`, clears Prefetch entries for all 4 binaries in the chain, clears 5 Windows Event Logs (Security, System, Application, PowerShell/Operational, Sysmon/Operational)
-- **File exfiltration:** screenshots saved as BMP, keylogs as text, browser DB copies — all under `exfil-data/<hostname>-<ip>/` on the operator host
+- **Self-destruct (SHUTDOWN):** deletes scheduled task; spawns hidden PowerShell to force-delete `MicrosoftEdgeUpdate.exe` immediately after process exits (2 s delay); `MoveFileExA(MOVEFILE_DELAY_UNTIL_REBOOT)` kept as fallback; wipes `ec.dat` / `ek.dat` / `kl.dat` / `ss.tmp`; removes `C:\Users\Public\MicrosoftEdge\`; clears Prefetch entries for all 4 binaries; clears 5 Windows Event Logs
+- **File exfiltration:** screenshots (BMP), keylogs (txt), browser credential DBs and master keys, browser history DBs — POSTed directly to `exfil-receiver:9443` (separate HTTPS channel); saved under `exfil-data/<hostname>/` on the operator host
 
 ### ✅ Category 3 — Stealth (15 pts)
 - **Hidden binary:** `-mwindows` (no console window), stripped symbols, no plaintext secrets in `.rodata` — ENROLLMENT_TOKEN XOR-obfuscated via `token_obf.h`; binary named `MicrosoftEdgeUpdate.exe` in `C:\Program Files (x86)\Microsoft\EdgeUpdate\`
 - **Log/artifact cleanup:** event logs cleared on shutdown, Prefetch files deleted without spawning a child process
-- **C2 traffic:** TLS 1.3 AES-256-GCM mTLS, 512-byte packet padding, jittered keepalive (20–40s) — encrypted and traffic-analysis resistant
-- **Redirector hop:** victim connects to `redirector:443` (socat raw TCP) → `c2-server:443`; real C2 IP never reaches the victim binary; `c2-server` has no host port and is unreachable from `frontnet`
-- **Exfil vs C2:** exfil data (screenshots, keylogs, creds) travels over the same mTLS channel as C2 commands — encrypted and indistinguishable from keepalive traffic; exfil server (`exfil-server:8443`) is a separate HTTPS endpoint used only for implant delivery
+- **C2 traffic:** TLS 1.3 AES-256-GCM mTLS, 512-byte packet padding, jittered keepalive (20–40s) — carries commands only; encrypted and traffic-analysis resistant
+- **Redirector hop (C2):** victim connects to `redirector:443` (socat raw TCP) → `c2-server:443`; real C2 IP never reaches the victim binary; `c2-server` has no host port and is unreachable from `frontnet`
+- **Exfil channel (separate from C2):** bulk data (screenshots, keylogs, creds, history) travels over a dedicated WinHTTP HTTPS channel to `exfil-receiver:9443` — different port, different TLS certificate chain, different traffic cadence (burst-on-command vs. jittered keepalive); satisfies rubric requirement that C2 and exfil are distinct encrypted channels each with at least one hop
 
 ### ✅ Category 4 — Concurrent C2 (2 pts)
 - Background `acceptor_thread` handles incoming connections independently of the operator UI

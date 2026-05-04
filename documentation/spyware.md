@@ -68,10 +68,6 @@ This document tracks the implemented spyware capabilities and outlines future fe
 *   **Process Injection:** 
     *   Migrate the implant code into a legitimate process like `explorer.exe` or `svchost.exe` to remain hidden from the task manager.
 
-### 5. Remote Input Control
-*   **Mouse Manipulation (`COMMAND_MOUSE_MOVE`, `COMMAND_MOUSE_CLICK`):**
-    *   Use `SetCursorPos` for absolute movement or `SendInput` for relative movement and clicking.
-*   **Keyboard Injection (`COMMAND_KEY_TAP`):**
-    *   Use `SendInput` to simulate keystrokes, allowing for remote "typing" into the victim's active windows.
+
 
 

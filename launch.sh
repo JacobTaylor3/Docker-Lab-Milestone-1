@@ -85,19 +85,22 @@ if [ "$IS_WSL" -eq 1 ]; then
     echo -e "    ${YELLOW}NOTE: VirtualBox must be installed on Windows with a Host-Only adapter configured.${NC}"
     echo ""
 
-    # Pull VirtualBox host-only adapter name and IP from Windows
+    # Find any Windows adapter with a 192.168.56.x address (VirtualBox host-only default subnet).
+    # Matching on subnet rather than adapter name handles cases where VirtualBox shows up
+    # as "Ethernet", "Ethernet 2", etc. instead of a clearly labelled VirtualBox adapter.
     HOSTONLY_IP=$(powershell.exe -Command \
-        "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { (Get-NetAdapter -InterfaceIndex \$_.InterfaceIndex -EA SilentlyContinue).InterfaceDescription -like '*VirtualBox*' } | Select-Object -First 1 -ExpandProperty IPAddress" \
+        "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' } | Select-Object -First 1 -ExpandProperty IPAddress" \
         2>/dev/null | tr -d '\r\n')
 
     HOSTONLY_IFACE=$(powershell.exe -Command \
-        "(Get-NetAdapter | Where-Object { \$_.InterfaceDescription -like '*VirtualBox*' } | Select-Object -First 1).Name" \
+        "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
         2>/dev/null | tr -d '\r\n')
 
     if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
-        echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← VirtualBox host-only adapter${NC}"
+        echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"
     else
-        echo -e "    ${YELLOW}[~] No VirtualBox host-only adapter found — you will need to enter IPs manually.${NC}"
+        echo -e "    ${YELLOW}[~] No adapter found on 192.168.56.x — you will need to enter IPs manually.${NC}"
+        echo -e "    ${CYAN}    Check that VirtualBox has a host-only adapter configured in the 192.168.56.0/24 subnet.${NC}"
     fi
 else
     echo -e "    ${YELLOW}NOTE: Your Windows VM must use a Host-Only adapter in VirtualBox.${NC}"

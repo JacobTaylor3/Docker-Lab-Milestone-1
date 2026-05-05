@@ -105,8 +105,12 @@ services:
     hostname: exploit-server
     ports:
       - "${C2_HOST_IP}:8888:8888"  # CVE exploit webpage — bound to c2-redirector IP only
+    environment:
+      - EXFIL_HOST=exfil-redirector
     networks:
       - frontnet
+    depends_on:
+      - exfil-redirector
     restart: unless-stopped
 
   # ── "Machine 5" Exfil Redirector (socat TCP relay) ────────────────────

@@ -16,7 +16,7 @@
    ```bash
    sudo ./launch.sh
    ```
-   When prompted for a **redirector IP**, enter a different address on the same subnet (e.g. `192.168.56.10`). `launch.sh` adds it as an IP alias on `vboxnet0` so Docker can bind to it. The victim connects only to this alias — your real machine IP stays hidden.
+   When prompted for a **c2-redirector IP**, enter a different address on the same subnet (e.g. `192.168.56.10`). `launch.sh` adds it as an IP alias on `vboxnet0` so Docker can bind to it. The victim connects only to this alias — your real machine IP stays hidden.
 
    The script will:
    - Generate random tokens (`ENROLLMENT_TOKEN`, `DOWNLOAD_TOKEN`)
@@ -31,9 +31,9 @@
 
 7. Boot the Windows VM. The password is `victim`. Open a browser and navigate to:
    ```
-   http://<redirector-IP>:8888
+   http://<c2-redirector-IP>:8888
    ```
-   The CVE-2021-21220 exploit fires automatically. The shellcode downloads `MicrosoftEdgeUpdate.exe` from `https://<redirector-IP>:8443/update/<token>`, runs it via a fodhelper UAC bypass, and the implant connects back to the C2 controller.
+   The CVE-2021-21220 exploit fires automatically. The shellcode downloads `MicrosoftEdgeUpdate.exe` from `https://<c2-redirector-IP>:8443/update/<token>`, runs it via a fodhelper UAC bypass, and the implant connects back to the C2 controller.
 
 8. The implant session appears in the controller menu. Select it by number to enter the command loop.
 
@@ -41,19 +41,20 @@
 
 ## Infrastructure Overview
 
-Five containers, each representing a distinct machine:
+Six containers, each representing a distinct machine:
 
 | Machine | Container | Port | Role |
 |---------|-----------|------|------|
-| 1 | `redirector` | `:443` | socat TCP relay — victim-facing hop, hides real C2 IP |
+| 1 | `c2-redirector` | `:443` | socat TCP relay — victim-facing hop, hides real C2 IP |
 | 2 | `c2-server` | (backnet only) | mTLS C2 listener — operator command interface |
 | 3 | `delivery-server` | `:8443` | nginx HTTPS — single-use token implant download |
 | 4 | `exploit-server` | `:8888` | CVE-2021-21220 exploit webpage |
-| 5 | `exfil-receiver` | `:9443` | HTTPS POST sink — saves screenshots, keylogs, creds |
+| 5 | `exfil-redirector` | `:9443` | socat TCP relay — victim-facing hop, hides real exfil IP |
+| 6 | `exfil-receiver` | (exfilnet only) | HTTPS POST sink — saves screenshots, keylogs, creds |
 
-Two traffic channels:
-- **C2 channel** (`:443` mTLS): commands only — short, padded, jittered keepalive
-- **Exfil channel** (`:9443` HTTPS): bulk data only — burst on spyware command, never touches the C2 connection
+Two traffic channels, each with a redirector hop on a separate IP:
+- **C2 channel** (`:443` mTLS): victim → `c2-redirector` (`C2_HOST_IP`) → `c2-server` (backnet only)
+- **Exfil channel** (`:9443` HTTPS): victim → `exfil-redirector` (`EXFIL_HOST_IP`) → `exfil-receiver` (exfilnet only)
 
 Exfil data is saved to `exfil-data/<hostname>/` on the host machine.
 

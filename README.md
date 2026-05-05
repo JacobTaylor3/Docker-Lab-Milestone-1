@@ -1,4 +1,4 @@
-# Capstone Docker Lab — Milestone 2
+# Capstone Docker Lab
 
 ## Setup
 

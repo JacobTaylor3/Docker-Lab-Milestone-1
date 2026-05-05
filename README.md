@@ -8,11 +8,11 @@
    cd Docker-Lab-Milestone-2
    ```
 
-2. Download the Windows victim VM from the shared drive and import it into VirtualBox. In VirtualBox: **File → Tools → Network Manager** — note the IPv4 address of your host-only adapter (e.g. `192.168.56.1`). This is your real C2 machine IP.
+2. Download the Windows victim VM from the shared drive and import it into VirtualBox. In VirtualBox: **File → Tools → Network Manager** — note the IPv4 address of your host-only adapter (It needs to be in the `192.168.56.0/24` subnet). Whatever ip Address is assinged (we recommend 192.168.56.1) is your real C2 machine IP.
 
-3. Start Docker Desktop (or the Docker daemon on Linux).
+4. Start Docker Desktop (or the Docker daemon on Linux).
 
-4. Run the launch script:
+5. Run the launch script:
    ```bash
    sudo ./launch.sh
    ```
@@ -23,19 +23,19 @@
    - Generate the full PKI (CA, controller cert, nginx cert)
    - Build and start all five containers (~5 min first run due to OpenSSL cross-compile)
 
-5. Once the lab is up, attach to the C2 controller:
+6. Once the lab is up, attach to the C2 controller:
    ```bash
    sudo docker attach c2-server
    ```
    Press Enter if the prompt does not appear immediately. Detach without stopping: **Ctrl+P then Ctrl+Q**.
 
-6. Boot the Windows VM. The password is `victim`. Open a browser and navigate to:
+7. Boot the Windows VM. The password is `victim`. Open a browser and navigate to:
    ```
    http://<redirector-IP>:8888
    ```
    The CVE-2021-21220 exploit fires automatically. The shellcode downloads `MicrosoftEdgeUpdate.exe` from `https://<redirector-IP>:8443/update/<token>`, runs it via a fodhelper UAC bypass, and the implant connects back to the C2 controller.
 
-7. The implant session appears in the controller menu. Select it by number to enter the command loop.
+8. The implant session appears in the controller menu. Select it by number to enter the command loop.
 
 ---
 

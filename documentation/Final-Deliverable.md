@@ -1,9 +1,5 @@
 
-
-
-
 # Final Deliverable Grading Rubric (60 pts + 10 bonus)
-
 
 The final deliverable is graded using the rubric below.
 Category/Requirements (what you must demonstrate in your presentation) 
@@ -42,43 +38,3 @@ diagram (hosts, hops, trust boundaries)
 Network throughput graph (Wireshark, pcap stats) shows low, burst-only traffic 2
 
 ---
-
-## Implementation Status
-
-### ✅ Category 1 — Zero-Click Exploitation (6 pts)
-- CVE-2021-21220 (V8 type confusion) exploit in `utils.js` — no user action required
-- Two-stage delivery: shellcode stager (`stager.asm`) downloads and executes `MicrosoftEdgeUpdate.exe` via PowerShell HTTPS; fodhelper UAC bypass elevates to Administrator before payload runs
-- Single-use DOWNLOAD_TOKEN (256-bit entropy) prevents analyst URL re-use; constant-time comparison prevents timing oracle
-
-### ✅ Category 2 — Implant Capability (15 pts)
-- **≥ 4 multi-step tasks:** SCREENSHOT (session-aware, SYSTEM→user helper), KEYLOG_START/STOP/DUMP, CRED_STEAL (DPAPI Master Key + SQLite), HISTORY_STEAL (Edge + Chrome)
-- **Arbitrary command execution:** `RUN_CMD` via `CreateProcess(CREATE_NO_WINDOW)` — output returned over mTLS
-- **Persistence:** `schtasks /ru SYSTEM /rl HIGHEST /sc ONLOGON` via ENABLE PERSISTENCE; survives reboot; DPAPI creds stored in `C:\Users\Public` (accessible from both user and SYSTEM contexts)
-- **Self-destruct (SHUTDOWN):** deletes scheduled task; spawns hidden PowerShell to force-delete `MicrosoftEdgeUpdate.exe` immediately after process exits (2 s delay); `MoveFileExA(MOVEFILE_DELAY_UNTIL_REBOOT)` kept as fallback; wipes `ec.dat` / `ek.dat` / `kl.dat` / `ss.tmp`; removes `C:\Users\Public\MicrosoftEdge\`; clears Prefetch entries for all 4 binaries; clears 5 Windows Event Logs
-- **File exfiltration:** screenshots (BMP), keylogs (txt), browser credential DBs and master keys, browser history DBs — POSTed directly to `exfil-receiver:9443` (separate HTTPS channel); saved under `exfil-data/<hostname>/` on the operator host
-
-### ✅ Category 3 — Stealth (15 pts)
-- **Hidden binary:** `-mwindows` (no console window), stripped symbols, no plaintext secrets in `.rodata` — ENROLLMENT_TOKEN XOR-obfuscated via `token_obf.h`; binary named `MicrosoftEdgeUpdate.exe` in `C:\Program Files (x86)\Microsoft\EdgeUpdate\`
-- **Log/artifact cleanup:** event logs cleared on shutdown, Prefetch files deleted without spawning a child process
-- **C2 traffic:** TLS 1.3 AES-256-GCM mTLS, 512-byte packet padding, jittered keepalive (20–40s) — carries commands only; encrypted and traffic-analysis resistant
-- **Redirector hop (C2):** victim connects to `redirector:443` (socat raw TCP) → `c2-server:443`; real C2 IP never reaches the victim binary; `c2-server` has no host port and is unreachable from `frontnet`
-- **Exfil channel (separate from C2):** bulk data (screenshots, keylogs, creds, history) travels over a dedicated WinHTTP HTTPS channel to `exfil-receiver:9443` — different port, different TLS certificate chain, different traffic cadence (burst-on-command vs. jittered keepalive); satisfies rubric requirement that C2 and exfil are distinct encrypted channels each with at least one hop
-
-### ✅ Category 4 — Concurrent C2 (2 pts)
-- Background `acceptor_thread` handles incoming connections independently of the operator UI
-- Up to 8 simultaneous implant sessions; each session fully independent (separate TLS state, separate exfil directory)
-- Session list shows live implants with IP, OS, hostname, persistence status; `[0] Refresh`, `[99] Shutdown All`
-- Single-instance mutex (`Global\MicrosoftEdgeUpdateMtx`) prevents duplicate implant processes from the same machine
-
-### ⚠️ Category 5 — Code Quality & Reproducibility (5 pts)
-- ✅ `launch.sh` — single command triggers full chain: token generation → PKI → shellcode build → docker compose up → health check
-- ✅ `ProjectOverview.md` documents build/run steps, architecture, token/crypto pipeline
-- ⚠️ **TODO:** Add threat model diagram to README (hosts, hops, trust boundaries)
-
-### ⚠️ Category 6 — Performance & Footprint (4 pts)
-- ✅ Implant uses `secure_jitter_sec()` sleep between reconnects; keepalive interval is 20–40s jittered — no busy-loop CPU burn
-- ⚠️ **TODO:** Capture live CPU/RAM profile on Windows target (perfmon / Task Manager) showing < 5% sustained
-- ⚠️ **TODO:** Capture Wireshark pcap showing low burst-only traffic pattern during normal operation
-
----
-

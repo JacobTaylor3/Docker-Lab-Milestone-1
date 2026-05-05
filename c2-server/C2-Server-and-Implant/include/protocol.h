@@ -36,7 +36,8 @@ typedef enum
     COMMAND_HISTORY_STEAL   = 18,
     COMMAND_CAMERA_SNAPSHOT  = 19,
     COMMAND_FILE_SEARCH      = 20,
-    COMMAND_MESSAGING_STEAL  = 21
+    COMMAND_MESSAGING_STEAL  = 21,
+    COMMAND_FILE_EXFIL       = 22
 } Command;
 
 typedef struct

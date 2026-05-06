@@ -86,37 +86,30 @@ add_ip_alias() {
     fi
 }
 
-# ── reset_to_dhcp <iface> ──────────────────────────────────────────────────
-reset_to_dhcp() {
+# ── remove_aliases <iface> ─────────────────────────────────────────────────
+# Removes only the alias IPs added by a previous run (C2_HOST_IP and
+# EXFIL_HOST_IP from .env), leaving the base adapter IP untouched.
+remove_aliases() {
     local iface="$1"
-    # Strip any existing quotes
     iface=$(echo "$iface" | sed "s/['\"]//g")
 
     if [ -n "$POWERSHELL_CMD" ]; then
         echo ""
-        echo -e "${YELLOW}[*] Resetting interface '${iface}' to DHCP to clean up old aliases...${NC}"
-        echo -e "    ${CYAN}(Note: We have no direct control over DHCP; VirtualBox assigns a new IP only when the VM reboots.)${NC}"
-        
-        # 1. Remove all existing IPv4 addresses (manual and DHCP) to ensure a clean slate
-        # We ignore errors because if there are no IPs, it throws a non-terminating error.
-        "$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$iface' -AddressFamily IPv4 | Remove-NetIPAddress -Confirm:\$false" &>/dev/null || true
-        
-        # 2. Enable DHCP to get the base IP back
-        local result
-        result=$("$POWERSHELL_CMD" -Command "Set-NetIPInterface -InterfaceAlias '$iface' -Dhcp Enabled" 2>&1 | tr -d '\r') || true
+        echo -e "${YELLOW}[*] Removing previous IP aliases from '${iface}'...${NC}"
 
-        if [ -n "$result" ]; then
-            echo -e "${RED}[!] Error: $result${NC}"
-            echo -e "    ${CYAN}(This action usually requires an ADMIN terminal)${NC}"
-            return 1
+        local removed=0
+        for ip in "$CURRENT_IP" "$CURRENT_EXFIL_IP"; do
+            [ -z "$ip" ] && continue
+            "$POWERSHELL_CMD" -Command "Remove-NetIPAddress -IPAddress '$ip' -Confirm:\$false" &>/dev/null || true
+            echo -e "    ${GREEN}[+] Removed alias: $ip${NC}"
+            removed=$((removed+1))
+        done
+
+        if [ "$removed" -eq 0 ]; then
+            echo -e "    ${CYAN}No aliases to remove.${NC}"
         fi
 
-        # 3. Force a DHCP renewal so Windows doesn't fall back to a 169.254 APIPA address
-        "$POWERSHELL_CMD" -Command "& ipconfig /renew '$iface'" &>/dev/null || true
-
-        echo -e "${GREEN}[+] Interface reset command sent.${NC}"
-
-        # Clear the .env IPs so the script doesn't think they are still current
+        # Clear from .env so the script doesn't think they are still current
         if [ -f "$ENV_FILE" ]; then
             sed -i '/C2_HOST_IP=/d' "$ENV_FILE"
             sed -i '/EXFIL_HOST_IP=/d' "$ENV_FILE"
@@ -124,6 +117,7 @@ reset_to_dhcp() {
             CURRENT_EXFIL_IP=""
         fi
 
+        echo -e "${GREEN}[+] Done. Base adapter IP is unchanged.${NC}"
         return 0
     fi
     return 1
@@ -199,32 +193,11 @@ if [ "$IS_WSL" -eq 1 ]; then
     if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
         echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"
         
-        echo ""
-        read -rp "    Reset this interface to DHCP to clean up old aliases? (y/N): " RESET_CONFIRM
-        if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
-            if reset_to_dhcp "$HOSTONLY_IFACE"; then
-                echo -e "    ${CYAN}Waiting for VirtualBox to assign a new IP...${NC}"
-                echo ""
-
-                # Re-detect IP after reset with a verification loop
-                HOSTONLY_IP=""
-                while [[ ! "$HOSTONLY_IP" == 192.168.56.* ]]; do
-                    HOSTONLY_IP=$("$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$HOSTONLY_IFACE' -AddressFamily IPv4 | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" 2>/dev/null | tr -d '\r\n') || true
-                    
-                    if [[ ! "$HOSTONLY_IP" == 192.168.56.* ]]; then
-                        if [[ "$HOSTONLY_IP" == 169.254.* ]]; then
-                            echo -e "    ${RED}[!] Detected APIPA address ($HOSTONLY_IP) — DHCP did not respond in time.${NC}"
-                            echo -e "    ${CYAN}This usually means the VirtualBox DHCP server hasn't assigned an address yet.${NC}"
-                            echo -e "    ${CYAN}Wait a few more seconds, then press Enter to retry.${NC}"
-                        else
-                            [ -n "$HOSTONLY_IP" ] && echo -e "    ${CYAN}(Detected IP: $HOSTONLY_IP — not in 192.168.56.x range, ignoring)${NC}"
-                            echo -e "    ${RED}[!] No 192.168.56.x IP detected on '${HOSTONLY_IFACE}' yet.${NC}"
-                            echo -e "    ${CYAN}VirtualBox might still be assigning the address. Please wait a moment.${NC}"
-                        fi
-                        read -rp "    Press Enter to try detecting the IP again: " TRY_AGAIN
-                    fi
-                done
-                echo -e "    ${GREEN}New Primary IP: $HOSTONLY_IP${NC}"
+        if [ -n "$CURRENT_IP" ] || [ -n "$CURRENT_EXFIL_IP" ]; then
+            echo ""
+            read -rp "    Remove old IP aliases from this interface? (y/N): " RESET_CONFIRM
+            if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
+                remove_aliases "$HOSTONLY_IFACE"
             fi
         fi
     else
@@ -270,34 +243,12 @@ if [ "$IS_WSL" -eq 1 ]; then
             fi
         fi
 
-        # Offer reset even for manual selection
-        if [ -n "$HOSTONLY_IFACE" ] && [ -n "$POWERSHELL_CMD" ]; then
+        # Offer alias cleanup even for manual selection
+        if [ -n "$HOSTONLY_IFACE" ] && [ -n "$POWERSHELL_CMD" ] && { [ -n "$CURRENT_IP" ] || [ -n "$CURRENT_EXFIL_IP" ]; }; then
             echo ""
-            read -rp "    Reset interface '${HOSTONLY_IFACE}' to DHCP to clean up old aliases? (y/N): " RESET_CONFIRM
+            read -rp "    Remove old IP aliases from interface '${HOSTONLY_IFACE}'? (y/N): " RESET_CONFIRM
             if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
-                if reset_to_dhcp "$HOSTONLY_IFACE"; then
-                    echo -e "    ${CYAN}Waiting for VirtualBox to assign a new IP...${NC}"
-                    echo ""
-
-                    # Re-detect IP after reset
-                    HOSTONLY_IP=""
-                    while [[ ! "$HOSTONLY_IP" == 192.168.56.* ]]; do
-                        HOSTONLY_IP=$("$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$HOSTONLY_IFACE' -AddressFamily IPv4 | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" 2>/dev/null | tr -d '\r\n') || true
-                        if [[ ! "$HOSTONLY_IP" == 192.168.56.* ]]; then
-                            if [[ "$HOSTONLY_IP" == 169.254.* ]]; then
-                                echo -e "    ${RED}[!] Detected APIPA address ($HOSTONLY_IP) — DHCP did not respond in time.${NC}"
-                                echo -e "    ${CYAN}This usually means the VirtualBox DHCP server hasn't assigned an address yet.${NC}"
-                                echo -e "    ${CYAN}Wait a few more seconds, then press Enter to retry.${NC}"
-                            else
-                                [ -n "$HOSTONLY_IP" ] && echo -e "    ${CYAN}(Detected IP: $HOSTONLY_IP — not in 192.168.56.x range, ignoring)${NC}"
-                                echo -e "    ${RED}[!] No 192.168.56.x IP detected on '${HOSTONLY_IFACE}' yet.${NC}"
-                                echo -e "    ${CYAN}VirtualBox might still be assigning the address. Please wait.${NC}"
-                            fi
-                            read -rp "    Press Enter to try detecting the IP again: " TRY_AGAIN
-                        fi
-                    done
-                    echo -e "    ${GREEN}New Primary IP: $HOSTONLY_IP${NC}"
-                fi
+                remove_aliases "$HOSTONLY_IFACE"
             fi
         fi
     fi

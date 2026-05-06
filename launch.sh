@@ -86,6 +86,21 @@ add_ip_alias() {
     fi
 }
 
+# ── remove_alias_ip <ip> <iface> ───────────────────────────────────────────
+# Removes a single IP alias. Handles WSL (PowerShell) and native Linux.
+remove_alias_ip() {
+    local ip="$1"
+    local iface="$2"
+    iface=$(echo "$iface" | sed "s/['\"]//g")
+    [ -z "$ip" ] && return 0
+
+    if [ "$IS_WSL" -eq 1 ] && [ -n "$POWERSHELL_CMD" ]; then
+        "$POWERSHELL_CMD" -Command "Remove-NetIPAddress -IPAddress '$ip' -Confirm:\$false" &>/dev/null || true
+    else
+        sudo ip addr del "${ip}/24" dev "$iface" 2>/dev/null || true
+    fi
+}
+
 # ── remove_aliases <iface> ─────────────────────────────────────────────────
 # Removes only the alias IPs added by a previous run (C2_HOST_IP and
 # EXFIL_HOST_IP from .env), leaving the base adapter IP untouched.
@@ -93,34 +108,30 @@ remove_aliases() {
     local iface="$1"
     iface=$(echo "$iface" | sed "s/['\"]//g")
 
-    if [ -n "$POWERSHELL_CMD" ]; then
-        echo ""
-        echo -e "${YELLOW}[*] Removing previous IP aliases from '${iface}'...${NC}"
+    echo ""
+    echo -e "${YELLOW}[*] Removing previous IP aliases from '${iface}'...${NC}"
 
-        local removed=0
-        for ip in "$CURRENT_IP" "$CURRENT_EXFIL_IP"; do
-            [ -z "$ip" ] && continue
-            "$POWERSHELL_CMD" -Command "Remove-NetIPAddress -IPAddress '$ip' -Confirm:\$false" &>/dev/null || true
-            echo -e "    ${GREEN}[+] Removed alias: $ip${NC}"
-            removed=$((removed+1))
-        done
+    local removed=0
+    for ip in "$CURRENT_IP" "$CURRENT_EXFIL_IP"; do
+        [ -z "$ip" ] && continue
+        remove_alias_ip "$ip" "$iface"
+        echo -e "    ${GREEN}[+] Removed alias: $ip${NC}"
+        removed=$((removed+1))
+    done
 
-        if [ "$removed" -eq 0 ]; then
-            echo -e "    ${CYAN}No aliases to remove.${NC}"
-        fi
-
-        # Clear from .env so the script doesn't think they are still current
-        if [ -f "$ENV_FILE" ]; then
-            sed -i '/C2_HOST_IP=/d' "$ENV_FILE"
-            sed -i '/EXFIL_HOST_IP=/d' "$ENV_FILE"
-            CURRENT_IP=""
-            CURRENT_EXFIL_IP=""
-        fi
-
-        echo -e "${GREEN}[+] Done. Base adapter IP is unchanged.${NC}"
-        return 0
+    if [ "$removed" -eq 0 ]; then
+        echo -e "    ${CYAN}No aliases to remove.${NC}"
     fi
-    return 1
+
+    # Clear from .env so the script doesn't think they are still current
+    if [ -f "$ENV_FILE" ]; then
+        sed -i '/C2_HOST_IP=/d' "$ENV_FILE"
+        sed -i '/EXFIL_HOST_IP=/d' "$ENV_FILE"
+        CURRENT_IP=""
+        CURRENT_EXFIL_IP=""
+    fi
+
+    echo -e "${GREEN}[+] Done. Base adapter IP is unchanged.${NC}"
 }
 
 echo ""
@@ -347,6 +358,11 @@ echo -e "${GREEN}[+] Using c2-redirector IP (C2_HOST_IP): ${HOST_IP}${NC}"
 # Always attempt — alias is lost on reboot even if .env still has the old IP.
 if [ -n "$HOSTONLY_IFACE" ] && [ "$HOST_IP" != "$HOSTONLY_IP" ]; then
     echo ""
+    # If the IP changed from the previous run, remove the old alias first.
+    if [ -n "$CURRENT_IP" ] && [ "$HOST_IP" != "$CURRENT_IP" ]; then
+        echo -e "${YELLOW}[*] C2 redirector IP changed ($CURRENT_IP → $HOST_IP), removing old alias...${NC}"
+        remove_alias_ip "$CURRENT_IP" "$HOSTONLY_IFACE"
+    fi
     echo -e "${YELLOW}[*] Adding IP alias ${HOST_IP} on ${HOSTONLY_IFACE}...${NC}"
     if add_ip_alias "$HOST_IP" "$HOSTONLY_IFACE"; then
         echo -e "${GREEN}[+] C2 redirector alias added — victim connects to ${HOST_IP}, not ${HOSTONLY_IP}.${NC}"
@@ -390,6 +406,11 @@ echo -e "${GREEN}[+] Using exfil-redirector IP (EXFIL_HOST_IP): ${EXFIL_IP}${NC}
 # Always attempt — alias is lost on reboot even if .env still has the old IP.
 if [ -n "$HOSTONLY_IFACE" ] && [ "$EXFIL_IP" != "$HOSTONLY_IP" ]; then
     echo ""
+    # If the exfil IP changed from the previous run, remove the old alias first.
+    if [ -n "$CURRENT_EXFIL_IP" ] && [ "$EXFIL_IP" != "$CURRENT_EXFIL_IP" ]; then
+        echo -e "${YELLOW}[*] Exfil redirector IP changed ($CURRENT_EXFIL_IP → $EXFIL_IP), removing old alias...${NC}"
+        remove_alias_ip "$CURRENT_EXFIL_IP" "$HOSTONLY_IFACE"
+    fi
     echo -e "${YELLOW}[*] Adding IP alias ${EXFIL_IP} on ${HOSTONLY_IFACE}...${NC}"
     if add_ip_alias "$EXFIL_IP" "$HOSTONLY_IFACE"; then
         echo -e "${GREEN}[+] Exfil redirector alias added — implant exfil POSTs to ${EXFIL_IP}, not ${HOSTONLY_IP}.${NC}"

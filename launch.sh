@@ -104,13 +104,16 @@ reset_to_dhcp() {
         # 2. Enable DHCP to get the base IP back
         local result
         result=$("$POWERSHELL_CMD" -Command "Set-NetIPInterface -InterfaceAlias '$iface' -Dhcp Enabled" 2>&1 | tr -d '\r') || true
-        
+
         if [ -n "$result" ]; then
             echo -e "${RED}[!] Error: $result${NC}"
             echo -e "    ${CYAN}(This action usually requires an ADMIN terminal)${NC}"
             return 1
         fi
-        
+
+        # 3. Force a DHCP renewal so Windows doesn't fall back to a 169.254 APIPA address
+        "$POWERSHELL_CMD" -Command "& ipconfig /renew '$iface'" &>/dev/null || true
+
         echo -e "${GREEN}[+] Interface reset command sent.${NC}"
 
         # Clear the .env IPs so the script doesn't think they are still current
@@ -200,22 +203,24 @@ if [ "$IS_WSL" -eq 1 ]; then
         read -rp "    Reset this interface to DHCP to clean up old aliases? (y/N): " RESET_CONFIRM
         if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
             if reset_to_dhcp "$HOSTONLY_IFACE"; then
+                echo -e "    ${CYAN}Waiting for VirtualBox to assign a new IP...${NC}"
                 echo ""
-                echo -e "    ${YELLOW}[!] Please REBOOT the Windows VM now.${NC}"
-                echo -e "    ${CYAN}Wait until the Windows VM reaches the login screen before pressing Enter.${NC}"
-                echo -e "    ${CYAN}This gives VirtualBox enough time to reassign the IP address to the host.${NC}"
-                echo ""
-                read -rp "    Press Enter once the Windows VM is back at the login screen: " VM_READY
-                
-                # Re-detect IP after reset and VM reboot with a verification loop
+
+                # Re-detect IP after reset with a verification loop
                 HOSTONLY_IP=""
                 while [[ ! "$HOSTONLY_IP" == 192.168.56.* ]]; do
                     HOSTONLY_IP=$("$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$HOSTONLY_IFACE' -AddressFamily IPv4 | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" 2>/dev/null | tr -d '\r\n') || true
                     
                     if [[ ! "$HOSTONLY_IP" == 192.168.56.* ]]; then
-                        [ -n "$HOSTONLY_IP" ] && echo -e "    ${CYAN}(Detected temporary IP: $HOSTONLY_IP - ignoring)${NC}"
-                        echo -e "    ${RED}[!] No 192.168.56.x IP detected on '${HOSTONLY_IFACE}' yet.${NC}"
-                        echo -e "    ${CYAN}VirtualBox might still be assigning the address. Please wait for the login screen.${NC}"
+                        if [[ "$HOSTONLY_IP" == 169.254.* ]]; then
+                            echo -e "    ${RED}[!] Detected APIPA address ($HOSTONLY_IP) — DHCP did not respond in time.${NC}"
+                            echo -e "    ${CYAN}This usually means the VirtualBox DHCP server hasn't assigned an address yet.${NC}"
+                            echo -e "    ${CYAN}Wait a few more seconds, then press Enter to retry.${NC}"
+                        else
+                            [ -n "$HOSTONLY_IP" ] && echo -e "    ${CYAN}(Detected IP: $HOSTONLY_IP — not in 192.168.56.x range, ignoring)${NC}"
+                            echo -e "    ${RED}[!] No 192.168.56.x IP detected on '${HOSTONLY_IFACE}' yet.${NC}"
+                            echo -e "    ${CYAN}VirtualBox might still be assigning the address. Please wait a moment.${NC}"
+                        fi
                         read -rp "    Press Enter to try detecting the IP again: " TRY_AGAIN
                     fi
                 done
@@ -271,15 +276,26 @@ if [ "$IS_WSL" -eq 1 ]; then
             read -rp "    Reset interface '${HOSTONLY_IFACE}' to DHCP to clean up old aliases? (y/N): " RESET_CONFIRM
             if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
                 if reset_to_dhcp "$HOSTONLY_IFACE"; then
+                    echo -e "    ${CYAN}Waiting for VirtualBox to assign a new IP...${NC}"
                     echo ""
-                    echo -e "    ${YELLOW}[!] Please REBOOT the Windows VM now.${NC}"
-                    echo -e "    ${CYAN}Wait until the Windows VM reaches the login screen before pressing Enter.${NC}"
-                    echo -e "    ${CYAN}This gives VirtualBox enough time to reassign the IP address to the host.${NC}"
-                    echo ""
-                    read -rp "    Press Enter once the Windows VM is back at the login screen: " VM_READY
-                    
-                    # Re-detect IP after reset and VM reboot
-                    HOSTONLY_IP=$("$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$HOSTONLY_IFACE' -AddressFamily IPv4 | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" 2>/dev/null | tr -d '\r\n') || true
+
+                    # Re-detect IP after reset
+                    HOSTONLY_IP=""
+                    while [[ ! "$HOSTONLY_IP" == 192.168.56.* ]]; do
+                        HOSTONLY_IP=$("$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$HOSTONLY_IFACE' -AddressFamily IPv4 | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" 2>/dev/null | tr -d '\r\n') || true
+                        if [[ ! "$HOSTONLY_IP" == 192.168.56.* ]]; then
+                            if [[ "$HOSTONLY_IP" == 169.254.* ]]; then
+                                echo -e "    ${RED}[!] Detected APIPA address ($HOSTONLY_IP) — DHCP did not respond in time.${NC}"
+                                echo -e "    ${CYAN}This usually means the VirtualBox DHCP server hasn't assigned an address yet.${NC}"
+                                echo -e "    ${CYAN}Wait a few more seconds, then press Enter to retry.${NC}"
+                            else
+                                [ -n "$HOSTONLY_IP" ] && echo -e "    ${CYAN}(Detected IP: $HOSTONLY_IP — not in 192.168.56.x range, ignoring)${NC}"
+                                echo -e "    ${RED}[!] No 192.168.56.x IP detected on '${HOSTONLY_IFACE}' yet.${NC}"
+                                echo -e "    ${CYAN}VirtualBox might still be assigning the address. Please wait.${NC}"
+                            fi
+                            read -rp "    Press Enter to try detecting the IP again: " TRY_AGAIN
+                        fi
+                    done
                     echo -e "    ${GREEN}New Primary IP: $HOSTONLY_IP${NC}"
                 fi
             fi

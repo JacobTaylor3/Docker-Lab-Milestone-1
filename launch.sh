@@ -19,8 +19,14 @@ NC='\033[0m' # No Color
 
 # ── WSL detection ──────────────────────────────────────────────────────────
 IS_WSL=0
+POWERSHELL_CMD=""
 if grep -qiE "microsoft|wsl" /proc/version 2>/dev/null; then
     IS_WSL=1
+    if command -v powershell.exe &>/dev/null; then
+        POWERSHELL_CMD="powershell.exe"
+    elif [ -f "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" ]; then
+        POWERSHELL_CMD="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    fi
 fi
 
 # ── add_ip_alias <ip> <iface> ──────────────────────────────────────────────
@@ -35,22 +41,26 @@ add_ip_alias() {
     iface=$(echo "$iface" | sed "s/['\"]//g")
 
     if [ "$IS_WSL" -eq 1 ]; then
-        local result
-        # Use escaped double quotes for the interface name (Windows standard)
-        # We use a double backslash because the first one is consumed by the shell/powershell parser.
-        result=$(powershell.exe -Command "netsh interface ip add address \\\"$iface\\\" $ip 255.255.255.0" 2>&1 | tr -d '\r') || true
-        
-        if echo "$result" | grep -qiE "ok|completed successfully"; then
-            return 0
-        else
+        if [ -n "$POWERSHELL_CMD" ]; then
+            local result
+            # Use escaped double quotes for the interface name (Windows standard)
+            result=$("$POWERSHELL_CMD" -Command "netsh interface ip add address \\\"$iface\\\" $ip 255.255.255.0" 2>&1 | tr -d '\r') || true
+            
+            if echo "$result" | grep -qiE "ok|completed successfully"; then
+                return 0
+            fi
+            
             echo -e "${YELLOW}[!] Could not add alias automatically.${NC}"
             if [ -n "$result" ]; then
                 echo -e "    ${RED}Error: $result${NC}"
             fi
-            echo -e "    Open an ${RED}admin${NC} PowerShell on Windows and run:"
-            echo -e "    ${CYAN}netsh interface ip add address \"$iface\" $ip 255.255.255.0${NC}"
-            read -rp "    Press Enter once done (or Enter to skip and continue): "
+        else
+            echo -e "${YELLOW}[!] powershell.exe not found (tried PATH and /mnt/c/). Skipping automatic alias addition.${NC}"
         fi
+
+        echo -e "    Open an ${RED}admin${NC} PowerShell on Windows and run:"
+        echo -e "    ${CYAN}netsh interface ip add address \"$iface\" $ip 255.255.255.0${NC}"
+        read -rp "    Press Enter once done (or Enter to skip and continue): "
     else
         if sudo ip addr add "${ip}/24" dev "$iface" 2>/dev/null; then
             return 0
@@ -94,23 +104,30 @@ if [ "$IS_WSL" -eq 1 ]; then
     echo ""
 
     # Find any Windows adapter with a 192.168.56.x address (VirtualBox host-only default subnet).
-    HOSTONLY_IP=$(powershell.exe -Command \
-        "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' } | Select-Object -First 1 -ExpandProperty IPAddress" \
-        2>/dev/null | tr -d '\r\n') || true
+    if [ -n "$POWERSHELL_CMD" ]; then
+        HOSTONLY_IP=$("$POWERSHELL_CMD" -Command \
+            "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' } | Select-Object -First 1 -ExpandProperty IPAddress" \
+            2>/dev/null | tr -d '\r\n') || true
 
-    HOSTONLY_IFACE=$(powershell.exe -Command \
-        "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
-        2>/dev/null | tr -d '\r\n') || true
+        HOSTONLY_IFACE=$("$POWERSHELL_CMD" -Command \
+            "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
+            2>/dev/null | tr -d '\r\n') || true
+    fi
 
     if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
         echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"
     else
         echo -e "    ${YELLOW}[~] No adapter found on 192.168.56.x subnet.${NC}"
-        echo -e "    ${CYAN}Attempting to list Windows adapters...${NC}"
-        echo ""
+        
+        if [ -n "$POWERSHELL_CMD" ]; then
+            echo -e "    ${CYAN}Attempting to list Windows adapters...${NC}"
+            echo ""
 
-        # Robust PowerShell command to list Alias and IP
-        mapfile -t ADAPTERS < <(powershell.exe -Command 'Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { $_.InterfaceAlias + " | " + $_.IPAddress }' 2>/dev/null | grep -v '127.0.0.1' | grep -v '169.254.' | tr -d '\r') || true
+            # Robust PowerShell command to list Alias and IP
+            mapfile -t ADAPTERS < <("$POWERSHELL_CMD" -Command 'Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { $_.InterfaceAlias + " | " + $_.IPAddress }' 2>/dev/null | grep -v '127.0.0.1' | grep -v '169.254.' | tr -d '\r') || true
+        else
+            ADAPTERS=()
+        fi
 
         if [ ${#ADAPTERS[@]} -eq 0 ]; then
             echo -e "    ${YELLOW}[!] Could not detect adapters automatically.${NC}"

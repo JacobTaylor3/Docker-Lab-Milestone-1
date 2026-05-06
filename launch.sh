@@ -86,8 +86,6 @@ if [ "$IS_WSL" -eq 1 ]; then
     echo ""
 
     # Find any Windows adapter with a 192.168.56.x address (VirtualBox host-only default subnet).
-    # Matching on subnet rather than adapter name handles cases where VirtualBox shows up
-    # as "Ethernet", "Ethernet 2", etc. instead of a clearly labelled VirtualBox adapter.
     HOSTONLY_IP=$(powershell.exe -Command \
         "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' } | Select-Object -First 1 -ExpandProperty IPAddress" \
         2>/dev/null | tr -d '\r\n') || true
@@ -99,8 +97,36 @@ if [ "$IS_WSL" -eq 1 ]; then
     if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
         echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"
     else
-        echo -e "    ${YELLOW}[~] No adapter found on 192.168.56.x — you will need to enter IPs manually.${NC}"
-        echo -e "    ${CYAN}    Check that VirtualBox has a host-only adapter configured in the 192.168.56.0/24 subnet.${NC}"
+        echo -e "    ${YELLOW}[~] No adapter found on 192.168.56.x subnet.${NC}"
+        echo -e "    ${CYAN}Listing all active Windows IPv4 adapters:${NC}"
+        echo ""
+
+        # Get list of adapters: "Name | IP"
+        mapfile -t ADAPTERS < <(powershell.exe -Command \
+            "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.AddressState -eq 'Preferred' -and \$_.IPAddress -notlike '127.*' -and \$_.IPAddress -notlike '169.254.*' } | ForEach-Object { \$adapter = Get-NetAdapter -InterfaceIndex \$_.InterfaceIndex; \"\$(\$adapter.Name) | \$(\$_.IPAddress)\" }" \
+            2>/dev/null | tr -d '\r')
+
+        if [ ${#ADAPTERS[@]} -eq 0 ]; then
+            echo -e "    ${RED}[!] No active Windows adapters found.${NC}"
+        else
+            for i in "${!ADAPTERS[@]}"; do
+                NAME=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f1 | sed 's/ *$//g')
+                IP=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f2 | sed 's/^ *//g')
+                echo -e "      [$((i+1))] ${GREEN}$NAME${NC} → $IP"
+            done
+            echo -e "      [M] Enter interface name manually"
+            echo ""
+            read -rp "    Select your VirtualBox adapter [1-${#ADAPTERS[@]}] or 'M': " SELECTION
+
+            if [[ "$SELECTION" =~ ^[0-9]+$ ]] && [ "$SELECTION" -ge 1 ] && [ "$SELECTION" -le "${#ADAPTERS[@]}" ]; then
+                INDEX=$((SELECTION-1))
+                HOSTONLY_IFACE=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f1 | sed 's/ *$//g')
+                HOSTONLY_IP=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f2 | sed 's/^ *//g')
+            elif [[ "$SELECTION" =~ ^[Mm]$ ]]; then
+                read -rp "    Enter Windows Interface Name (e.g. 'VirtualBox Host-Only Network'): " HOSTONLY_IFACE
+                read -rp "    Enter Interface IP (e.g. 192.168.99.1): " HOSTONLY_IP
+            fi
+        fi
     fi
 else
     echo -e "    ${YELLOW}NOTE: Your Windows VM must use a Host-Only adapter in VirtualBox.${NC}"

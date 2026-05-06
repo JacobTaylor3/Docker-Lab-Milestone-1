@@ -102,26 +102,60 @@ remove_alias_ip() {
 }
 
 # ── remove_aliases <iface> ─────────────────────────────────────────────────
-# Removes only the alias IPs added by a previous run (C2_HOST_IP and
-# EXFIL_HOST_IP from .env), leaving the base adapter IP untouched.
+# Scans the adapter for ALL 192.168.56.x addresses, shows them to the user,
+# treats the lowest as the base IP (VirtualBox always assigns the host the
+# lowest address, e.g. .1), and removes the rest after confirmation.
+# Does NOT rely on HOSTONLY_IP or .env so orphaned aliases are always caught.
 remove_aliases() {
     local iface="$1"
     iface=$(echo "$iface" | sed "s/['\"]//g")
 
     echo ""
-    echo -e "${YELLOW}[*] Removing previous IP aliases from '${iface}'...${NC}"
+    echo -e "${YELLOW}[*] Scanning '${iface}' for 192.168.56.x addresses...${NC}"
+
+    local -a ALL_IPS=()
+    if [ "$IS_WSL" -eq 1 ] && [ -n "$POWERSHELL_CMD" ]; then
+        mapfile -t ALL_IPS < <("$POWERSHELL_CMD" -Command \
+            "Get-NetIPAddress -InterfaceAlias '$iface' -AddressFamily IPv4 \
+             | Where-Object { \$_.IPAddress -like '192.168.56.*' } \
+             | Sort-Object { [version]\$_.IPAddress } \
+             | Select-Object -ExpandProperty IPAddress" \
+            2>/dev/null | tr -d '\r') || true
+    else
+        mapfile -t ALL_IPS < <(ip -o -4 addr show dev "$iface" 2>/dev/null \
+            | awk '{print $4}' | cut -d/ -f1 | grep '^192\.168\.56\.' | sort -t. -k4 -n)
+    fi
+
+    if [ "${#ALL_IPS[@]}" -le 1 ]; then
+        echo -e "    ${CYAN}Only one 192.168.56.x address present — nothing to remove.${NC}"
+        return 0
+    fi
+
+    # Lowest IP = base (VirtualBox assigns the host .1; aliases are always higher)
+    local base_ip="${ALL_IPS[0]}"
+    echo -e "    Found ${#ALL_IPS[@]} addresses:"
+    for ip in "${ALL_IPS[@]}"; do
+        if [ "$ip" = "$base_ip" ]; then
+            echo -e "      ${GREEN}$ip${NC}  ← base (will be kept)"
+        else
+            echo -e "      ${YELLOW}$ip${NC}  ← alias (will be removed)"
+        fi
+    done
+    echo ""
+    read -rp "    Proceed? (y/N): " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || return 0
 
     local removed=0
-    for ip in "$CURRENT_IP" "$CURRENT_EXFIL_IP"; do
-        [ -z "$ip" ] && continue
-        remove_alias_ip "$ip" "$iface"
-        echo -e "    ${GREEN}[+] Removed alias: $ip${NC}"
+    for ip in "${ALL_IPS[@]}"; do
+        [ "$ip" = "$base_ip" ] && continue
+        if [ "$IS_WSL" -eq 1 ] && [ -n "$POWERSHELL_CMD" ]; then
+            "$POWERSHELL_CMD" -Command "Remove-NetIPAddress -IPAddress '$ip' -Confirm:\$false" &>/dev/null || true
+        else
+            sudo ip addr del "${ip}/24" dev "$iface" 2>/dev/null || true
+        fi
+        echo -e "    ${GREEN}[+] Removed: $ip${NC}"
         removed=$((removed+1))
     done
-
-    if [ "$removed" -eq 0 ]; then
-        echo -e "    ${CYAN}No aliases to remove.${NC}"
-    fi
 
     # Clear from .env so the script doesn't think they are still current
     if [ -f "$ENV_FILE" ]; then
@@ -131,7 +165,8 @@ remove_aliases() {
         CURRENT_EXFIL_IP=""
     fi
 
-    echo -e "${GREEN}[+] Done. Base adapter IP is unchanged.${NC}"
+    echo -e "${GREEN}[+] Done. ${removed} alias(es) removed. Base IP (${base_ip}) is unchanged.${NC}"
+    HOSTONLY_IP="$base_ip"
 }
 
 echo ""
@@ -204,7 +239,7 @@ if [ "$IS_WSL" -eq 1 ]; then
     if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
         echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"
         
-        if [ -n "$CURRENT_IP" ] || [ -n "$CURRENT_EXFIL_IP" ]; then
+        if [ -n "$POWERSHELL_CMD" ]; then
             echo ""
             read -rp "    Remove old IP aliases from this interface? (y/N): " RESET_CONFIRM
             if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
@@ -255,7 +290,7 @@ if [ "$IS_WSL" -eq 1 ]; then
         fi
 
         # Offer alias cleanup even for manual selection
-        if [ -n "$HOSTONLY_IFACE" ] && [ -n "$POWERSHELL_CMD" ] && { [ -n "$CURRENT_IP" ] || [ -n "$CURRENT_EXFIL_IP" ]; }; then
+        if [ -n "$HOSTONLY_IFACE" ] && [ -n "$POWERSHELL_CMD" ]; then
             echo ""
             read -rp "    Remove old IP aliases from interface '${HOSTONLY_IFACE}'? (y/N): " RESET_CONFIRM
             if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then

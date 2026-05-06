@@ -160,22 +160,42 @@ if [ "$IS_WSL" -eq 1 ]; then
     echo -e "    ${YELLOW}NOTE: VirtualBox must be installed on Windows with a Host-Only adapter configured.${NC}"
     echo ""
 
-    # Find any Windows adapter with a 192.168.56.x address (VirtualBox host-only default subnet).
-    # We sort by IP address numerically (using [version]) and pick the lowest one.
-    # This ensures we find the real host (usually .1) instead of our aliases (.10, .11, etc).
-    if [ -n "$POWERSHELL_CMD" ]; then
-        HOSTONLY_IP=$("$POWERSHELL_CMD" -Command \
-            "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" \
-            2>/dev/null | tr -d '\r\n') || true
+    # Loop until we find a 192.168.56.x adapter or the user chooses manual mode.
+    # This handles cases where the VM is still booting or needs a reboot.
+    while true; do
+        if [ -n "$POWERSHELL_CMD" ]; then
+            HOSTONLY_IP=$("$POWERSHELL_CMD" -Command \
+                "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" \
+                2>/dev/null | tr -d '\r\n') || true
 
-        HOSTONLY_IFACE=$("$POWERSHELL_CMD" -Command \
-            "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
-            2>/dev/null | tr -d '\r\n') || true
-    fi
+            HOSTONLY_IFACE=$("$POWERSHELL_CMD" -Command \
+                "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
+                2>/dev/null | tr -d '\r\n') || true
+        fi
+
+        # Found a 192.168.56.x IP?
+        if [[ "$HOSTONLY_IP" == 192.168.56.* ]] && [ -n "$HOSTONLY_IFACE" ]; then
+            break # Found it!
+        fi
+
+        # If we got something else (like an empty string or a junk IP), it doesn't count.
+        HOSTONLY_IP=""
+        HOSTONLY_IFACE=""
+
+        echo -e "    ${YELLOW}[~] No 192.168.56.x adapter found.${NC}"
+        echo -e "    ${CYAN}    VirtualBox assigns this IP when the Windows VM boots.${NC}"
+        echo -e "    ${CYAN}    If your VM is off or still booting, please wait for the login screen.${NC}"
+        echo ""
+        read -rp "    Press Enter to try detecting again, or 'M' for manual/advanced mode: " CMD
+        if [[ "$CMD" =~ ^[Mm]$ ]]; then
+            break # Exit loop to hit the manual selection logic below
+        fi
+        echo ""
+    done
 
     if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
         echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"
-
+        
         echo ""
         read -rp "    Reset this interface to DHCP to clean up old aliases? (y/N): " RESET_CONFIRM
         if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
@@ -189,12 +209,13 @@ if [ "$IS_WSL" -eq 1 ]; then
                 
                 # Re-detect IP after reset and VM reboot with a verification loop
                 HOSTONLY_IP=""
-                while [ -z "$HOSTONLY_IP" ]; do
+                while [[ ! "$HOSTONLY_IP" == 192.168.56.* ]]; do
                     HOSTONLY_IP=$("$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$HOSTONLY_IFACE' -AddressFamily IPv4 | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" 2>/dev/null | tr -d '\r\n') || true
                     
-                    if [ -z "$HOSTONLY_IP" ]; then
-                        echo -e "    ${RED}[!] No IP detected on '${HOSTONLY_IFACE}' yet.${NC}"
-                        echo -e "    ${CYAN}VirtualBox might still be assigning the address. Please wait a moment.${NC}"
+                    if [[ ! "$HOSTONLY_IP" == 192.168.56.* ]]; then
+                        [ -n "$HOSTONLY_IP" ] && echo -e "    ${CYAN}(Detected temporary IP: $HOSTONLY_IP - ignoring)${NC}"
+                        echo -e "    ${RED}[!] No 192.168.56.x IP detected on '${HOSTONLY_IFACE}' yet.${NC}"
+                        echo -e "    ${CYAN}VirtualBox might still be assigning the address. Please wait for the login screen.${NC}"
                         read -rp "    Press Enter to try detecting the IP again: " TRY_AGAIN
                     fi
                 done
@@ -202,8 +223,7 @@ if [ "$IS_WSL" -eq 1 ]; then
             fi
         fi
     else
-        echo -e "    ${YELLOW}[~] No adapter found on 192.168.56.x subnet.${NC}"
-        
+        # Fallback to manual selection if auto-detection failed or was skipped
         if [ -n "$POWERSHELL_CMD" ]; then
             echo -e "    ${CYAN}Attempting to list Windows adapters...${NC}"
             echo ""

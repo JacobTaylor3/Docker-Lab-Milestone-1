@@ -113,14 +113,15 @@ if [ "$IS_WSL" -eq 1 ]; then
             echo -e "    ${CYAN}Please enter your VirtualBox interface details manually.${NC}"
             echo -e "    ${CYAN}(Note: Omit the word 'adapter' — e.g., use 'Ethernet 3' not 'Ethernet adapter Ethernet 3')${NC}"
             echo ""
-            read -rp "    Enter Windows Interface Name (e.g. Ethernet 3): " HOSTONLY_IFACE
+            read -rp "    Enter Windows Interface Name (e.g. 'Ethernet 3'): " HOSTONLY_IFACE
             read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
         else
             for i in "${!ADAPTERS[@]}"; do
-                NAME=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f1 | sed 's/ *$//g')
-                IP=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f2 | sed 's/^ *//g')
+                # Sanitize the name and IP, removing any stray characters like ] or \r
+                NAME=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f1 | sed 's/[][\r]*$//g' | sed 's/ *$//g')
+                IP=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f2 | sed 's/^ *//g' | tr -d '\r')
                 [ -z "$NAME" ] && continue
-                echo -e "      [$((i+1))] ${GREEN}$NAME${NC} → $IP"
+                echo -e "      [$((i+1))] '${GREEN}$NAME${NC}' → $IP"
             done
             echo -e "      [M] Enter interface name manually"
             echo ""
@@ -128,12 +129,12 @@ if [ "$IS_WSL" -eq 1 ]; then
 
             if [[ "$SELECTION" =~ ^[0-9]+$ ]] && [ "$SELECTION" -ge 1 ] && [ "$SELECTION" -le "${#ADAPTERS[@]}" ]; then
                 INDEX=$((SELECTION-1))
-                HOSTONLY_IFACE=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f1 | sed 's/ *$//g')
-                HOSTONLY_IP=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f2 | sed 's/^ *//g')
+                HOSTONLY_IFACE=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f1 | sed 's/[][\r]*$//g' | sed 's/ *$//g')
+                HOSTONLY_IP=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f2 | sed 's/^ *//g' | tr -d '\r')
             else
                 echo ""
                 echo -e "    ${CYAN}(Note: Omit the word 'adapter' — e.g., use 'Ethernet 3' not 'Ethernet adapter Ethernet 3')${NC}"
-                read -rp "    Enter Windows Interface Name (e.g. Ethernet 3): " HOSTONLY_IFACE
+                read -rp "    Enter Windows Interface Name (e.g. 'Ethernet 3'): " HOSTONLY_IFACE
                 read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
             fi
         fi

@@ -29,7 +29,7 @@ Note: There are alternative instructions too which go a bit more in depth: https
    The script will:
    - Generate random tokens (`ENROLLMENT_TOKEN`, `DOWNLOAD_TOKEN`)
    - Generate the full PKI (CA, controller cert, nginx cert)
-   - Build and start all five containers (~5 min first run due to OpenSSL cross-compile)
+   - Build and start all six containers 
 
 6. Once the lab is up, attach to the C2 controller:
    ```bash
@@ -90,4 +90,4 @@ ls exfil-data/
 
 ## Full Documentation
 
-See [`documentation/ProjectOverview.md`](documentation/ProjectOverview.md) for the complete architecture, token/crypto pipeline, payload flow, and changelog.
+See [`documentation/ProjectOverview.md`](documentation/ProjectOverview.md) for the complete architecture, token/crypto pipeline, payload flow.

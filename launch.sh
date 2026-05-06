@@ -377,15 +377,14 @@ fi
 echo -e "${GREEN}[+] Using c2-redirector IP (C2_HOST_IP): ${HOST_IP}${NC}"
 
 # ── 3a. Add IP alias so Docker can bind the c2-redirector port to HOST_IP ──
+# Always attempt — alias is lost on reboot even if .env still has the old IP.
 if [ -n "$HOSTONLY_IFACE" ] && [ "$HOST_IP" != "$HOSTONLY_IP" ]; then
-    if [ "$HOST_IP" != "$CURRENT_IP" ]; then
-        echo ""
-        echo -e "${YELLOW}[*] Adding IP alias ${HOST_IP} on ${HOSTONLY_IFACE}...${NC}"
-        if add_ip_alias "$HOST_IP" "$HOSTONLY_IFACE"; then
-            echo -e "${GREEN}[+] C2 redirector alias added — victim connects to ${HOST_IP}, not ${HOSTONLY_IP}.${NC}"
-        else
-            echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
-        fi
+    echo ""
+    echo -e "${YELLOW}[*] Adding IP alias ${HOST_IP} on ${HOSTONLY_IFACE}...${NC}"
+    if add_ip_alias "$HOST_IP" "$HOSTONLY_IFACE"; then
+        echo -e "${GREEN}[+] C2 redirector alias added — victim connects to ${HOST_IP}, not ${HOSTONLY_IP}.${NC}"
+    else
+        echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
     fi
 fi
 
@@ -421,15 +420,14 @@ fi
 echo -e "${GREEN}[+] Using exfil-redirector IP (EXFIL_HOST_IP): ${EXFIL_IP}${NC}"
 
 # ── 3c. Add IP alias for exfil-redirector ─────────────────────────
+# Always attempt — alias is lost on reboot even if .env still has the old IP.
 if [ -n "$HOSTONLY_IFACE" ] && [ "$EXFIL_IP" != "$HOSTONLY_IP" ]; then
-    if [ "$EXFIL_IP" != "$CURRENT_EXFIL_IP" ]; then
-        echo ""
-        echo -e "${YELLOW}[*] Adding IP alias ${EXFIL_IP} on ${HOSTONLY_IFACE}...${NC}"
-        if add_ip_alias "$EXFIL_IP" "$HOSTONLY_IFACE"; then
-            echo -e "${GREEN}[+] Exfil redirector alias added — implant exfil POSTs to ${EXFIL_IP}, not ${HOSTONLY_IP}.${NC}"
-        else
-            echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
-        fi
+    echo ""
+    echo -e "${YELLOW}[*] Adding IP alias ${EXFIL_IP} on ${HOSTONLY_IFACE}...${NC}"
+    if add_ip_alias "$EXFIL_IP" "$HOSTONLY_IFACE"; then
+        echo -e "${GREEN}[+] Exfil redirector alias added — implant exfil POSTs to ${EXFIL_IP}, not ${HOSTONLY_IP}.${NC}"
+    else
+        echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
     fi
 fi
 
@@ -531,6 +529,52 @@ if [ $CONFLICT -eq 1 ]; then
     fi
 else
     echo -e "${GREEN}[+] No port conflicts.${NC}"
+fi
+
+# ── 6. Verify IP aliases exist before Docker tries to bind them ───────────
+# Docker Desktop 500 error means the IP doesn't exist on the host yet.
+# Catch this here rather than letting docker compose fail mid-build.
+echo ""
+echo -e "${YELLOW}[*] Verifying IP aliases are present on host...${NC}"
+
+ip_exists() {
+    local ip="$1"
+    if [ "$IS_WSL" -eq 1 ] && [ -n "$POWERSHELL_CMD" ]; then
+        "$POWERSHELL_CMD" -Command \
+            "Get-NetIPAddress -IPAddress '$ip' -ErrorAction SilentlyContinue" \
+            &>/dev/null || true
+        "$POWERSHELL_CMD" -Command \
+            "if (Get-NetIPAddress -IPAddress '$ip' -EA SilentlyContinue) { exit 0 } else { exit 1 }" \
+            &>/dev/null
+    else
+        ip addr show 2>/dev/null | grep -q "inet ${ip}/"
+    fi
+}
+
+ALIAS_OK=1
+for CHECK_IP in "$HOST_IP" "$EXFIL_IP"; do
+    if ip_exists "$CHECK_IP"; then
+        echo -e "    ${GREEN}[+] $CHECK_IP is present on host.${NC}"
+    else
+        echo -e "    ${RED}[!] $CHECK_IP is NOT assigned to any interface.${NC}"
+        echo -e "    ${CYAN}    Docker will fail to bind ports to this IP.${NC}"
+        if [ "$IS_WSL" -eq 1 ] && [ -n "$HOSTONLY_IFACE" ]; then
+            echo -e "    ${CYAN}    Run this in an admin PowerShell, then re-run launch.sh:${NC}"
+            echo -e "    ${CYAN}    netsh interface ip add address name='${HOSTONLY_IFACE}' addr=${CHECK_IP} mask=255.255.255.0${NC}"
+        fi
+        ALIAS_OK=0
+    fi
+done
+
+if [ "$ALIAS_OK" -eq 0 ]; then
+    read -rp "    One or more IPs are missing. Continue anyway? (y/N): " ALIAS_CONFIRM
+    ALIAS_CONFIRM="${ALIAS_CONFIRM:-N}"
+    if [[ ! "$ALIAS_CONFIRM" =~ ^[Yy]$ ]]; then
+        echo -e "${RED}[!] Exiting. Add the missing aliases and re-run.${NC}"
+        exit 1
+    fi
+else
+    echo -e "${GREEN}[+] All IP aliases confirmed.${NC}"
 fi
 
 # ── 7. Build and launch ───────────────────────

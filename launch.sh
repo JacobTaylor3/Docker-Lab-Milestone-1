@@ -95,6 +95,7 @@ reset_to_dhcp() {
     if [ -n "$POWERSHELL_CMD" ]; then
         echo ""
         echo -e "${YELLOW}[*] Resetting interface '${iface}' to DHCP to clean up old aliases...${NC}"
+        echo -e "    ${CYAN}(Note: We have no direct control over DHCP; VirtualBox assigns a new IP only when the VM reboots.)${NC}"
         
         # 1. Remove all existing IPv4 addresses (manual and DHCP) to ensure a clean slate
         # We ignore errors because if there are no IPs, it throws a non-terminating error.
@@ -110,8 +111,16 @@ reset_to_dhcp() {
             return 1
         fi
         
-        echo -e "${GREEN}[+] Interface reset. Waiting 5 seconds for DHCP assignment...${NC}"
-        sleep 5
+        echo -e "${GREEN}[+] Interface reset command sent.${NC}"
+
+        # Clear the .env IPs so the script doesn't think they are still current
+        if [ -f "$ENV_FILE" ]; then
+            sed -i '/C2_HOST_IP=/d' "$ENV_FILE"
+            sed -i '/EXFIL_HOST_IP=/d' "$ENV_FILE"
+            CURRENT_IP=""
+            CURRENT_EXFIL_IP=""
+        fi
+
         return 0
     fi
     return 1
@@ -164,15 +173,28 @@ if [ "$IS_WSL" -eq 1 ]; then
             2>/dev/null | tr -d '\r\n') || true
     fi
 
-    if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
-        echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"
-        
         echo ""
         read -rp "    Reset this interface to DHCP to clean up old aliases? (y/N): " RESET_CONFIRM
         if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
             if reset_to_dhcp "$HOSTONLY_IFACE"; then
-                # Re-detect IP after reset
-                HOSTONLY_IP=$("$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$HOSTONLY_IFACE' -AddressFamily IPv4 | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" 2>/dev/null | tr -d '\r\n') || true
+                echo ""
+                echo -e "    ${YELLOW}[!] Please REBOOT the Windows VM now.${NC}"
+                echo -e "    ${CYAN}Wait until the Windows VM reaches the login screen before pressing Enter.${NC}"
+                echo -e "    ${CYAN}This gives VirtualBox enough time to reassign the IP address to the host.${NC}"
+                echo ""
+                read -rp "    Press Enter once the Windows VM is back at the login screen: " VM_READY
+                
+                # Re-detect IP after reset and VM reboot with a verification loop
+                HOSTONLY_IP=""
+                while [ -z "$HOSTONLY_IP" ]; do
+                    HOSTONLY_IP=$("$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$HOSTONLY_IFACE' -AddressFamily IPv4 | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" 2>/dev/null | tr -d '\r\n') || true
+                    
+                    if [ -z "$HOSTONLY_IP" ]; then
+                        echo -e "    ${RED}[!] No IP detected on '${HOSTONLY_IFACE}' yet.${NC}"
+                        echo -e "    ${CYAN}VirtualBox might still be assigning the address. Please wait a moment.${NC}"
+                        read -rp "    Press Enter to try detecting the IP again: " TRY_AGAIN
+                    fi
+                done
                 echo -e "    ${GREEN}New Primary IP: $HOSTONLY_IP${NC}"
             fi
         fi
@@ -226,6 +248,14 @@ if [ "$IS_WSL" -eq 1 ]; then
             read -rp "    Reset interface '${HOSTONLY_IFACE}' to DHCP to clean up old aliases? (y/N): " RESET_CONFIRM
             if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
                 if reset_to_dhcp "$HOSTONLY_IFACE"; then
+                    echo ""
+                    echo -e "    ${YELLOW}[!] Please REBOOT the Windows VM now.${NC}"
+                    echo -e "    ${CYAN}Wait until the Windows VM reaches the login screen before pressing Enter.${NC}"
+                    echo -e "    ${CYAN}This gives VirtualBox enough time to reassign the IP address to the host.${NC}"
+                    echo ""
+                    read -rp "    Press Enter once the Windows VM is back at the login screen: " VM_READY
+                    
+                    # Re-detect IP after reset and VM reboot
                     HOSTONLY_IP=$("$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$HOSTONLY_IFACE' -AddressFamily IPv4 | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" 2>/dev/null | tr -d '\r\n') || true
                     echo -e "    ${GREEN}New Primary IP: $HOSTONLY_IP${NC}"
                 fi

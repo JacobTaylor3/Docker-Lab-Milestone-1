@@ -95,6 +95,12 @@ reset_to_dhcp() {
     if [ -n "$POWERSHELL_CMD" ]; then
         echo ""
         echo -e "${YELLOW}[*] Resetting interface '${iface}' to DHCP to clean up old aliases...${NC}"
+        
+        # 1. Remove all existing IPv4 addresses (manual and DHCP) to ensure a clean slate
+        # We ignore errors because if there are no IPs, it throws a non-terminating error.
+        "$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$iface' -AddressFamily IPv4 | Remove-NetIPAddress -Confirm:\$false" &>/dev/null || true
+        
+        # 2. Enable DHCP to get the base IP back
         local result
         result=$("$POWERSHELL_CMD" -Command "Set-NetIPInterface -InterfaceAlias '$iface' -Dhcp Enabled" 2>&1 | tr -d '\r') || true
         
@@ -104,8 +110,8 @@ reset_to_dhcp() {
             return 1
         fi
         
-        echo -e "${GREEN}[+] Interface reset. Waiting 3 seconds for DHCP assignment...${NC}"
-        sleep 3
+        echo -e "${GREEN}[+] Interface reset. Waiting 5 seconds for DHCP assignment...${NC}"
+        sleep 5
         return 0
     fi
     return 1

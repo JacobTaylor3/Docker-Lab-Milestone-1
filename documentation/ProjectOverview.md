@@ -547,17 +547,6 @@ Select a command:
 
 ---
 
-## 🛠 Advanced Spyware & Remote Access (Roadmap)
-
-The project is architected for modular expansion. Remaining planned features include:
-* **Defensive Evasion:** Automated disabling of Windows Defender and anti-sandbox checks.
-* **WiFi Harvesting:** Stealing saved network passwords via `netsh wlan`.
-* **Process Injection:** Migrating the implant into `explorer.exe` or `svchost.exe`.
-
-See `spyware.md` for the full technical roadmap and implementation status of all capabilities.
-
----
-
 ## Post-Exfiltration Analysis
 
 Captured browser data can be analyzed using the scripts in `utils-scripts/`.

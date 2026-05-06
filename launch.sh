@@ -31,19 +31,24 @@ add_ip_alias() {
     local ip="$1"
     local iface="$2"
     
-    # Strip any existing quotes from iface name to avoid doubling up
+    # Strip any existing quotes from iface name
     iface=$(echo "$iface" | sed "s/['\"]//g")
 
     if [ "$IS_WSL" -eq 1 ]; then
         local result
-        # Only the interface name is wrapped in single quotes; avoid outer double quotes for the command
-        result=$(powershell.exe -Command netsh interface ip add address "'$iface'" $ip 255.255.255.0 2>&1 | tr -d '\r') || true
+        # Use escaped double quotes for the interface name (Windows standard)
+        # We use a double backslash because the first one is consumed by the shell/powershell parser.
+        result=$(powershell.exe -Command "netsh interface ip add address \\\"$iface\\\" $ip 255.255.255.0" 2>&1 | tr -d '\r') || true
+        
         if echo "$result" | grep -qiE "ok|completed successfully"; then
             return 0
         else
-            echo -e "${YELLOW}[!] Could not add alias automatically — netsh may need elevation.${NC}"
+            echo -e "${YELLOW}[!] Could not add alias automatically.${NC}"
+            if [ -n "$result" ]; then
+                echo -e "    ${RED}Error: $result${NC}"
+            fi
             echo -e "    Open an ${RED}admin${NC} PowerShell on Windows and run:"
-            echo -e "    ${CYAN}netsh interface ip add address '$iface' $ip 255.255.255.0${NC}"
+            echo -e "    ${CYAN}netsh interface ip add address \"$iface\" $ip 255.255.255.0${NC}"
             read -rp "    Press Enter once done (or Enter to skip and continue): "
         fi
     else
@@ -104,9 +109,8 @@ if [ "$IS_WSL" -eq 1 ]; then
         echo -e "    ${CYAN}Attempting to list Windows adapters...${NC}"
         echo ""
 
-        # Simplified PowerShell command using single quotes for bash to avoid escaping hell
-        mapfile -t ADAPTERS < <(powershell.exe -Command \
-            'Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { $a = Get-NetAdapter -InterfaceIndex $_.InterfaceIndex; "$($a.Name) | $($_.IPAddress)" }' 2>/dev/null | grep -v '127.0.0.1' | grep -v '169.254.' | tr -d '\r') || true
+        # Robust PowerShell command to list Alias and IP
+        mapfile -t ADAPTERS < <(powershell.exe -Command 'Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { $_.InterfaceAlias + " | " + $_.IPAddress }' 2>/dev/null | grep -v '127.0.0.1' | grep -v '169.254.' | tr -d '\r') || true
 
         if [ ${#ADAPTERS[@]} -eq 0 ]; then
             echo -e "    ${YELLOW}[!] Could not detect adapters automatically.${NC}"
@@ -117,8 +121,8 @@ if [ "$IS_WSL" -eq 1 ]; then
             read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
         else
             for i in "${!ADAPTERS[@]}"; do
-                # Sanitize the name and IP, removing any stray characters like ] or \r
-                NAME=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f1 | sed 's/[][\r]*$//g' | sed 's/ *$//g')
+                # Sanitize the name and IP
+                NAME=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f1 | sed 's/ *$//g' | tr -d '\r')
                 IP=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f2 | sed 's/^ *//g' | tr -d '\r')
                 [ -z "$NAME" ] && continue
                 echo -e "      [$((i+1))] '${GREEN}$NAME${NC}' → $IP"
@@ -129,7 +133,7 @@ if [ "$IS_WSL" -eq 1 ]; then
 
             if [[ "$SELECTION" =~ ^[0-9]+$ ]] && [ "$SELECTION" -ge 1 ] && [ "$SELECTION" -le "${#ADAPTERS[@]}" ]; then
                 INDEX=$((SELECTION-1))
-                HOSTONLY_IFACE=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f1 | sed 's/[][\r]*$//g' | sed 's/ *$//g')
+                HOSTONLY_IFACE=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f1 | sed 's/ *$//g' | tr -d '\r')
                 HOSTONLY_IP=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f2 | sed 's/^ *//g' | tr -d '\r')
             else
                 echo ""

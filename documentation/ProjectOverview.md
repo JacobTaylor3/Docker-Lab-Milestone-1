@@ -568,8 +568,6 @@ python3 utils-scripts/read_history.py
 
 ## Dependencies Downloaded inside Docker
 
-`launch.sh` checks for all of these and exits with a clear message if any are missing:
-
 | Tool | Purpose | Install |
 |---|---|---|
 | `docker` + compose plugin | Container runtime | Official Docker docs |
@@ -584,7 +582,7 @@ python3 utils-scripts/read_history.py
 ## Usage
 
 ```bash
-cd "/home/hero/Documents/CS 564/Docker/Docker-Lab-Milestone-2"
+cd "/home/hero/Documents/CS 564/Docker/Docker-Lab"
 sudo ./launch.sh
 ```
 

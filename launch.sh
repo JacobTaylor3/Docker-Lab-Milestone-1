@@ -36,16 +36,14 @@ add_ip_alias() {
 
     if [ "$IS_WSL" -eq 1 ]; then
         local result
-        # Wrap the interface name in escaped double quotes for the netsh command
-        result=$(powershell.exe -Command \
-            "netsh interface ip add address \"$iface\" $ip 255.255.255.0" \
-            2>&1 | tr -d '\r') || true
+        # Only the interface name is wrapped in single quotes; avoid outer double quotes for the command
+        result=$(powershell.exe -Command netsh interface ip add address "'$iface'" $ip 255.255.255.0 2>&1 | tr -d '\r') || true
         if echo "$result" | grep -qiE "ok|completed successfully"; then
             return 0
         else
             echo -e "${YELLOW}[!] Could not add alias automatically — netsh may need elevation.${NC}"
             echo -e "    Open an ${RED}admin${NC} PowerShell on Windows and run:"
-            echo -e "    ${CYAN}netsh interface ip add address \"$iface\" $ip 255.255.255.0${NC}"
+            echo -e "    ${CYAN}netsh interface ip add address '$iface' $ip 255.255.255.0${NC}"
             read -rp "    Press Enter once done (or Enter to skip and continue): "
         fi
     else
@@ -113,8 +111,9 @@ if [ "$IS_WSL" -eq 1 ]; then
         if [ ${#ADAPTERS[@]} -eq 0 ]; then
             echo -e "    ${YELLOW}[!] Could not detect adapters automatically.${NC}"
             echo -e "    ${CYAN}Please enter your VirtualBox interface details manually.${NC}"
+            echo -e "    ${CYAN}(Note: Omit the word 'adapter' — e.g., use 'Ethernet 3' not 'Ethernet adapter Ethernet 3')${NC}"
             echo ""
-            read -rp "    Enter Windows Interface Name (e.g. VirtualBox Host-Only Network): " HOSTONLY_IFACE
+            read -rp "    Enter Windows Interface Name (e.g. Ethernet 3): " HOSTONLY_IFACE
             read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
         else
             for i in "${!ADAPTERS[@]}"; do
@@ -133,7 +132,8 @@ if [ "$IS_WSL" -eq 1 ]; then
                 HOSTONLY_IP=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f2 | sed 's/^ *//g')
             else
                 echo ""
-                read -rp "    Enter Windows Interface Name (e.g. VirtualBox Host-Only Network): " HOSTONLY_IFACE
+                echo -e "    ${CYAN}(Note: Omit the word 'adapter' — e.g., use 'Ethernet 3' not 'Ethernet adapter Ethernet 3')${NC}"
+                read -rp "    Enter Windows Interface Name (e.g. Ethernet 3): " HOSTONLY_IFACE
                 read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
             fi
         fi

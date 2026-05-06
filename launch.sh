@@ -11,6 +11,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 
+# Extract current IPs from .env if they exist, to exclude them from adapter detection
+CURRENT_IP=$(grep -oP '(?<=C2_HOST_IP=)\S+' "$ENV_FILE" 2>/dev/null || echo "")
+CURRENT_EXFIL_IP=$(grep -oP '(?<=EXFIL_HOST_IP=)\S+' "$ENV_FILE" 2>/dev/null || echo "")
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -116,13 +120,14 @@ if [ "$IS_WSL" -eq 1 ]; then
     echo ""
 
     # Find any Windows adapter with a 192.168.56.x address (VirtualBox host-only default subnet).
+    # We exclude the current redirector IPs from the search so we find the real host IP.
     if [ -n "$POWERSHELL_CMD" ]; then
         HOSTONLY_IP=$("$POWERSHELL_CMD" -Command \
-            "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' } | Select-Object -First 1 -ExpandProperty IPAddress" \
+            "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Select-Object -First 1 -ExpandProperty IPAddress" \
             2>/dev/null | tr -d '\r\n') || true
 
         HOSTONLY_IFACE=$("$POWERSHELL_CMD" -Command \
-            "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
+            "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
             2>/dev/null | tr -d '\r\n') || true
     fi
 
@@ -135,8 +140,8 @@ if [ "$IS_WSL" -eq 1 ]; then
             echo -e "    ${CYAN}Attempting to list Windows adapters...${NC}"
             echo ""
 
-            # Robust PowerShell command to list Alias and IP
-            mapfile -t ADAPTERS < <("$POWERSHELL_CMD" -Command 'Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { $_.InterfaceAlias + " | " + $_.IPAddress }' 2>/dev/null | grep -v '127.0.0.1' | grep -v '169.254.' | tr -d '\r') || true
+            # Robust PowerShell command to list Alias and IP (excluding current aliases)
+            mapfile -t ADAPTERS < <("$POWERSHELL_CMD" -Command "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | ForEach-Object { \$_.InterfaceAlias + ' | ' + \$_.IPAddress }" 2>/dev/null | grep -v '127.0.0.1' | grep -v '169.254.' | tr -d '\r') || true
         else
             ADAPTERS=()
         fi

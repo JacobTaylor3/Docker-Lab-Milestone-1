@@ -46,21 +46,22 @@ add_ip_alias() {
 
     if [ "$IS_WSL" -eq 1 ]; then
         if [ -n "$POWERSHELL_CMD" ]; then
-            # Check if IP already exists to avoid unnecessary changes or errors
-            if "$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$iface' -IPAddress $ip -ErrorAction SilentlyContinue" &>/dev/null; then
-                echo -e "    ${GREEN}[+] IP $ip is already assigned to '$iface'.${NC}"
+            # 1. Pre-check: Is it already there?
+            if "$POWERSHELL_CMD" -Command "Get-NetIPAddress -IPAddress $ip -ErrorAction SilentlyContinue" &>/dev/null; then
+                echo -e "    ${GREEN}[+] IP $ip is already assigned.${NC}"
                 return 0
             fi
             
+            # 2. Attempt addition
             local result
-            # Use outer double quotes for the command and inner single quotes for the interface name
-            # This is the specific format verified to work in WSL-to-Windows interop
             result=$("$POWERSHELL_CMD" -Command "netsh interface ip add address name='$iface' addr=$ip mask=255.255.255.0" 2>&1 | tr -d '\r') || true
             
-            if echo "$result" | grep -qiE "ok|completed successfully"; then
+            # 3. Post-check: Source of truth is whether the IP exists now
+            if "$POWERSHELL_CMD" -Command "Get-NetIPAddress -IPAddress $ip -ErrorAction SilentlyContinue" &>/dev/null; then
                 return 0
             fi
             
+            # 4. If we reach here, it actually failed
             echo -e "${YELLOW}[!] Could not add alias automatically.${NC}"
             if [ -n "$result" ]; then
                 echo -e "    ${RED}Error: $result${NC}"
@@ -73,9 +74,9 @@ add_ip_alias() {
         echo -e "    ${CYAN}netsh interface ip add address name='$iface' addr=$ip mask=255.255.255.0${NC}"
         read -rp "    Press Enter once done (or Enter to skip and continue): "
     else
-        # Check if IP exists on Linux
+        # Linux check/add
         if ip addr show dev "$iface" 2>/dev/null | grep -q "$ip"; then
-            echo -e "    ${GREEN}[+] IP $ip is already assigned to '$iface'.${NC}"
+            echo -e "    ${GREEN}[+] IP $ip is already assigned.${NC}"
             return 0
         fi
         if sudo ip addr add "${ip}/24" dev "$iface" 2>/dev/null; then

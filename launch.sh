@@ -86,6 +86,31 @@ add_ip_alias() {
     fi
 }
 
+# ── reset_to_dhcp <iface> ──────────────────────────────────────────────────
+reset_to_dhcp() {
+    local iface="$1"
+    # Strip any existing quotes
+    iface=$(echo "$iface" | sed "s/['\"]//g")
+
+    if [ -n "$POWERSHELL_CMD" ]; then
+        echo ""
+        echo -e "${YELLOW}[*] Resetting interface '${iface}' to DHCP to clean up old aliases...${NC}"
+        local result
+        result=$("$POWERSHELL_CMD" -Command "Set-NetIPInterface -InterfaceAlias '$iface' -Dhcp Enabled" 2>&1 | tr -d '\r') || true
+        
+        if [ -n "$result" ]; then
+            echo -e "${RED}[!] Error: $result${NC}"
+            echo -e "    ${CYAN}(This action usually requires an ADMIN terminal)${NC}"
+            return 1
+        fi
+        
+        echo -e "${GREEN}[+] Interface reset. Waiting 3 seconds for DHCP assignment...${NC}"
+        sleep 3
+        return 0
+    fi
+    return 1
+}
+
 echo ""
 echo -e "${CYAN}================================================${NC}"
 echo -e "${CYAN}       Capstone Docker Lab — Launch Script      ${NC}"
@@ -121,19 +146,30 @@ if [ "$IS_WSL" -eq 1 ]; then
     echo ""
 
     # Find any Windows adapter with a 192.168.56.x address (VirtualBox host-only default subnet).
-    # We exclude the current redirector IPs from the search so we find the real host IP.
+    # We sort by IP address numerically (using [version]) and pick the lowest one.
+    # This ensures we find the real host (usually .1) instead of our aliases (.10, .11, etc).
     if [ -n "$POWERSHELL_CMD" ]; then
         HOSTONLY_IP=$("$POWERSHELL_CMD" -Command \
-            "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Select-Object -First 1 -ExpandProperty IPAddress" \
+            "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" \
             2>/dev/null | tr -d '\r\n') || true
 
         HOSTONLY_IFACE=$("$POWERSHELL_CMD" -Command \
-            "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
+            "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
             2>/dev/null | tr -d '\r\n') || true
     fi
 
     if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
         echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"
+        
+        echo ""
+        read -rp "    Reset this interface to DHCP to clean up old aliases? (y/N): " RESET_CONFIRM
+        if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
+            if reset_to_dhcp "$HOSTONLY_IFACE"; then
+                # Re-detect IP after reset
+                HOSTONLY_IP=$("$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$HOSTONLY_IFACE' -AddressFamily IPv4 | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" 2>/dev/null | tr -d '\r\n') || true
+                echo -e "    ${GREEN}New Primary IP: $HOSTONLY_IP${NC}"
+            fi
+        fi
     else
         echo -e "    ${YELLOW}[~] No adapter found on 192.168.56.x subnet.${NC}"
         
@@ -175,6 +211,18 @@ if [ "$IS_WSL" -eq 1 ]; then
                 echo -e "    ${CYAN}(Note: Omit the word 'adapter' — e.g., use 'Ethernet 3' not 'Ethernet adapter Ethernet 3')${NC}"
                 read -rp "    Enter Windows Interface Name (e.g. 'Ethernet 3'): " HOSTONLY_IFACE
                 read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
+            fi
+        fi
+
+        # Offer reset even for manual selection
+        if [ -n "$HOSTONLY_IFACE" ] && [ -n "$POWERSHELL_CMD" ]; then
+            echo ""
+            read -rp "    Reset interface '${HOSTONLY_IFACE}' to DHCP to clean up old aliases? (y/N): " RESET_CONFIRM
+            if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
+                if reset_to_dhcp "$HOSTONLY_IFACE"; then
+                    HOSTONLY_IP=$("$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$HOSTONLY_IFACE' -AddressFamily IPv4 | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" 2>/dev/null | tr -d '\r\n') || true
+                    echo -e "    ${GREEN}New Primary IP: $HOSTONLY_IP${NC}"
+                fi
             fi
         fi
     fi

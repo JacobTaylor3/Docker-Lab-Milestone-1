@@ -265,12 +265,14 @@ echo -e "${GREEN}[+] Using c2-redirector IP (C2_HOST_IP): ${HOST_IP}${NC}"
 
 # ── 3a. Add IP alias so Docker can bind the c2-redirector port to HOST_IP ──
 if [ -n "$HOSTONLY_IFACE" ] && [ "$HOST_IP" != "$HOSTONLY_IP" ]; then
-    echo ""
-    echo -e "${YELLOW}[*] Adding IP alias ${HOST_IP} on ${HOSTONLY_IFACE}...${NC}"
-    if add_ip_alias "$HOST_IP" "$HOSTONLY_IFACE"; then
-        echo -e "${GREEN}[+] C2 redirector alias added — victim connects to ${HOST_IP}, not ${HOSTONLY_IP}.${NC}"
-    else
-        echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
+    if [ "$HOST_IP" != "$CURRENT_IP" ]; then
+        echo ""
+        echo -e "${YELLOW}[*] Adding IP alias ${HOST_IP} on ${HOSTONLY_IFACE}...${NC}"
+        if add_ip_alias "$HOST_IP" "$HOSTONLY_IFACE"; then
+            echo -e "${GREEN}[+] C2 redirector alias added — victim connects to ${HOST_IP}, not ${HOSTONLY_IP}.${NC}"
+        else
+            echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
+        fi
     fi
 fi
 
@@ -307,12 +309,14 @@ echo -e "${GREEN}[+] Using exfil-redirector IP (EXFIL_HOST_IP): ${EXFIL_IP}${NC}
 
 # ── 3c. Add IP alias for exfil-redirector ─────────────────────────
 if [ -n "$HOSTONLY_IFACE" ] && [ "$EXFIL_IP" != "$HOSTONLY_IP" ]; then
-    echo ""
-    echo -e "${YELLOW}[*] Adding IP alias ${EXFIL_IP} on ${HOSTONLY_IFACE}...${NC}"
-    if add_ip_alias "$EXFIL_IP" "$HOSTONLY_IFACE"; then
-        echo -e "${GREEN}[+] Exfil redirector alias added — implant exfil POSTs to ${EXFIL_IP}, not ${HOSTONLY_IP}.${NC}"
-    else
-        echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
+    if [ "$EXFIL_IP" != "$CURRENT_EXFIL_IP" ]; then
+        echo ""
+        echo -e "${YELLOW}[*] Adding IP alias ${EXFIL_IP} on ${HOSTONLY_IFACE}...${NC}"
+        if add_ip_alias "$EXFIL_IP" "$HOSTONLY_IFACE"; then
+            echo -e "${GREEN}[+] Exfil redirector alias added — implant exfil POSTs to ${EXFIL_IP}, not ${HOSTONLY_IP}.${NC}"
+        else
+            echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
+        fi
     fi
 fi
 

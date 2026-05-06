@@ -43,8 +43,9 @@ add_ip_alias() {
     if [ "$IS_WSL" -eq 1 ]; then
         if [ -n "$POWERSHELL_CMD" ]; then
             local result
-            # Use escaped double quotes for the interface name (Windows standard)
-            result=$("$POWERSHELL_CMD" -Command "netsh interface ip add address \\\"$iface\\\" $ip 255.255.255.0" 2>&1 | tr -d '\r') || true
+            # Use outer double quotes for the command and inner single quotes for the interface name
+            # This is the specific format verified to work in WSL-to-Windows interop
+            result=$("$POWERSHELL_CMD" -Command "netsh interface ip add address '$iface' $ip 255.255.255.0" 2>&1 | tr -d '\r') || true
             
             if echo "$result" | grep -qiE "ok|completed successfully"; then
                 return 0
@@ -59,7 +60,7 @@ add_ip_alias() {
         fi
 
         echo -e "    Open an ${RED}admin${NC} PowerShell on Windows and run:"
-        echo -e "    ${CYAN}netsh interface ip add address \"$iface\" $ip 255.255.255.0${NC}"
+        echo -e "    ${CYAN}netsh interface ip add address '$iface' $ip 255.255.255.0${NC}"
         read -rp "    Press Enter once done (or Enter to skip and continue): "
     else
         if sudo ip addr add "${ip}/24" dev "$iface" 2>/dev/null; then

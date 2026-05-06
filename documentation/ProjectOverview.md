@@ -576,36 +576,3 @@ python3 utils-scripts/read_history.py
 | `x86_64-w64-mingw32-gcc` | Cross-compile Windows implant | `sudo apt install gcc-mingw-w64-x86-64` |
 | `openssl` | Generate PKI + tokens | `sudo apt install openssl` |
 | `python3` | Generate `implant_certs.h` | `sudo apt install python3` |
-
----
-
-## Usage
-
-```bash
-cd "/home/hero/Documents/CS 564/Docker/Docker-Lab"
-sudo ./launch.sh
-```
-
-### Useful commands
-
-```bash
-# Attach to the C2 controller interactive menu
-sudo docker attach c2-server
-# Detach without stopping: Ctrl+P then Ctrl+Q
-
-# Monitor logs per container
-sudo docker logs -f delivery-server
-sudo docker logs -f exploit-server
-sudo docker logs -f exfil-receiver
-
-# Shell into a container for debugging
-sudo docker exec -it c2-server /bin/bash
-sudo docker exec -it delivery-server /bin/bash
-sudo docker exec -it exfil-receiver /bin/bash
-
-# Check exfil data saved on host
-ls exfil-data/
-```
-
----
-

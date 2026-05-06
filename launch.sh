@@ -173,6 +173,9 @@ if [ "$IS_WSL" -eq 1 ]; then
             2>/dev/null | tr -d '\r\n') || true
     fi
 
+    if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
+        echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"
+
         echo ""
         read -rp "    Reset this interface to DHCP to clean up old aliases? (y/N): " RESET_CONFIRM
         if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then

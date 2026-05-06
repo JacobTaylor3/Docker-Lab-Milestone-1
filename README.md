@@ -2,6 +2,8 @@
 
 ## Setup
 
+Threat Model Diagram: https://drive.google.com/file/d/10E8f0o-9Dk7D49TNTwUJC52Zn2m6lrR1/view?usp=sharing
+
 1. Clone the repo:
    ```bash
    git clone https://github.com/JacobTaylor3/Docker-Lab-Milestone-2.git

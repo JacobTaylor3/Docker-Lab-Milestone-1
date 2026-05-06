@@ -42,9 +42,11 @@ add_ip_alias() {
 
     if [ "$IS_WSL" -eq 1 ]; then
         if [ -n "$POWERSHELL_CMD" ]; then
-            # Clean up old alias if it exists (ignore errors if it doesn't)
-            # We use explicit name= and addr= for maximum compatibility
-            "$POWERSHELL_CMD" -Command "netsh interface ip delete address name='$iface' addr=$ip" 2>/dev/null || true
+            # Check if IP already exists to avoid unnecessary changes or errors
+            if "$POWERSHELL_CMD" -Command "Get-NetIPAddress -InterfaceAlias '$iface' -IPAddress $ip -ErrorAction SilentlyContinue" &>/dev/null; then
+                echo -e "    ${GREEN}[+] IP $ip is already assigned to '$iface'.${NC}"
+                return 0
+            fi
             
             local result
             # Use outer double quotes for the command and inner single quotes for the interface name
@@ -64,12 +66,14 @@ add_ip_alias() {
         fi
 
         echo -e "    Open an ${RED}admin${NC} PowerShell on Windows and run:"
-        echo -e "    ${CYAN}netsh interface ip delete address name='$iface' addr=$ip${NC}"
         echo -e "    ${CYAN}netsh interface ip add address name='$iface' addr=$ip mask=255.255.255.0${NC}"
         read -rp "    Press Enter once done (or Enter to skip and continue): "
     else
-        # Linux cleanup
-        sudo ip addr del "${ip}/24" dev "$iface" 2>/dev/null || true
+        # Check if IP exists on Linux
+        if ip addr show dev "$iface" 2>/dev/null | grep -q "$ip"; then
+            echo -e "    ${GREEN}[+] IP $ip is already assigned to '$iface'.${NC}"
+            return 0
+        fi
         if sudo ip addr add "${ip}/24" dev "$iface" 2>/dev/null; then
             return 0
         fi

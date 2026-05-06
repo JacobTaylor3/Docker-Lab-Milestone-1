@@ -12,6 +12,8 @@
 
 4. Start Docker Desktop (or the Docker daemon on Linux).
 
+   > **Windows (WSL) users:** `launch.sh` uses `netsh` to add IP aliases to your VirtualBox adapter, which requires administrator rights. Right-click your WSL distro (Ubuntu or whichever you use) in the Start menu and select **Run as administrator** before continuing.
+
 5. Run the launch script:
    ```bash
    sudo ./launch.sh

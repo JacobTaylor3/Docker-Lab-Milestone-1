@@ -86,6 +86,89 @@ add_ip_alias() {
     fi
 }
 
+# ── remove_alias_ip <ip> <iface> ───────────────────────────────────────────
+# Removes a single IP alias. Handles WSL (PowerShell) and native Linux.
+remove_alias_ip() {
+    local ip="$1"
+    local iface="$2"
+    iface=$(echo "$iface" | sed "s/['\"]//g")
+    [ -z "$ip" ] && return 0
+
+    if [ "$IS_WSL" -eq 1 ] && [ -n "$POWERSHELL_CMD" ]; then
+        "$POWERSHELL_CMD" -Command "Remove-NetIPAddress -IPAddress '$ip' -Confirm:\$false" &>/dev/null || true
+    else
+        sudo ip addr del "${ip}/24" dev "$iface" 2>/dev/null || true
+    fi
+}
+
+# ── remove_aliases <iface> ─────────────────────────────────────────────────
+# Scans the adapter for ALL 192.168.56.x addresses, shows them to the user,
+# treats the lowest as the base IP (VirtualBox always assigns the host the
+# lowest address, e.g. .1), and removes the rest after confirmation.
+# Does NOT rely on HOSTONLY_IP or .env so orphaned aliases are always caught.
+remove_aliases() {
+    local iface="$1"
+    iface=$(echo "$iface" | sed "s/['\"]//g")
+
+    echo ""
+    echo -e "${YELLOW}[*] Scanning '${iface}' for 192.168.56.x addresses...${NC}"
+
+    local -a ALL_IPS=()
+    if [ "$IS_WSL" -eq 1 ] && [ -n "$POWERSHELL_CMD" ]; then
+        mapfile -t ALL_IPS < <("$POWERSHELL_CMD" -Command \
+            "Get-NetIPAddress -InterfaceAlias '$iface' -AddressFamily IPv4 \
+             | Where-Object { \$_.IPAddress -like '192.168.56.*' } \
+             | Sort-Object { [version]\$_.IPAddress } \
+             | Select-Object -ExpandProperty IPAddress" \
+            2>/dev/null | tr -d '\r') || true
+    else
+        mapfile -t ALL_IPS < <(ip -o -4 addr show dev "$iface" 2>/dev/null \
+            | awk '{print $4}' | cut -d/ -f1 | grep '^192\.168\.56\.' | sort -t. -k4 -n)
+    fi
+
+    if [ "${#ALL_IPS[@]}" -le 1 ]; then
+        echo -e "    ${CYAN}Only one 192.168.56.x address present — nothing to remove.${NC}"
+        return 0
+    fi
+
+    # Lowest IP = base (VirtualBox assigns the host .1; aliases are always higher)
+    local base_ip="${ALL_IPS[0]}"
+    echo -e "    Found ${#ALL_IPS[@]} addresses:"
+    for ip in "${ALL_IPS[@]}"; do
+        if [ "$ip" = "$base_ip" ]; then
+            echo -e "      ${GREEN}$ip${NC}  ← base (will be kept)"
+        else
+            echo -e "      ${YELLOW}$ip${NC}  ← alias (will be removed)"
+        fi
+    done
+    echo ""
+    read -rp "    Proceed? (y/N): " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || return 0
+
+    local removed=0
+    for ip in "${ALL_IPS[@]}"; do
+        [ "$ip" = "$base_ip" ] && continue
+        if [ "$IS_WSL" -eq 1 ] && [ -n "$POWERSHELL_CMD" ]; then
+            "$POWERSHELL_CMD" -Command "Remove-NetIPAddress -IPAddress '$ip' -Confirm:\$false" &>/dev/null || true
+        else
+            sudo ip addr del "${ip}/24" dev "$iface" 2>/dev/null || true
+        fi
+        echo -e "    ${GREEN}[+] Removed: $ip${NC}"
+        removed=$((removed+1))
+    done
+
+    # Clear from .env so the script doesn't think they are still current
+    if [ -f "$ENV_FILE" ]; then
+        sed -i '/C2_HOST_IP=/d' "$ENV_FILE"
+        sed -i '/EXFIL_HOST_IP=/d' "$ENV_FILE"
+        CURRENT_IP=""
+        CURRENT_EXFIL_IP=""
+    fi
+
+    echo -e "${GREEN}[+] Done. ${removed} alias(es) removed. Base IP (${base_ip}) is unchanged.${NC}"
+    HOSTONLY_IP="$base_ip"
+}
+
 echo ""
 echo -e "${CYAN}================================================${NC}"
 echo -e "${CYAN}       Capstone Docker Lab — Launch Script      ${NC}"
@@ -120,23 +203,51 @@ if [ "$IS_WSL" -eq 1 ]; then
     echo -e "    ${YELLOW}NOTE: VirtualBox must be installed on Windows with a Host-Only adapter configured.${NC}"
     echo ""
 
-    # Find any Windows adapter with a 192.168.56.x address (VirtualBox host-only default subnet).
-    # We exclude the current redirector IPs from the search so we find the real host IP.
-    if [ -n "$POWERSHELL_CMD" ]; then
-        HOSTONLY_IP=$("$POWERSHELL_CMD" -Command \
-            "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Select-Object -First 1 -ExpandProperty IPAddress" \
-            2>/dev/null | tr -d '\r\n') || true
+    # Loop until we find a 192.168.56.x adapter or the user chooses manual mode.
+    # This handles cases where the VM is still booting or needs a reboot.
+    while true; do
+        if [ -n "$POWERSHELL_CMD" ]; then
+            HOSTONLY_IP=$("$POWERSHELL_CMD" -Command \
+                "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress" \
+                2>/dev/null | tr -d '\r\n') || true
 
-        HOSTONLY_IFACE=$("$POWERSHELL_CMD" -Command \
-            "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
-            2>/dev/null | tr -d '\r\n') || true
-    fi
+            HOSTONLY_IFACE=$("$POWERSHELL_CMD" -Command \
+                "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' -and \$_.IPAddress -ne '$CURRENT_IP' -and \$_.IPAddress -ne '$CURRENT_EXFIL_IP' } | Sort-Object { [version]\$_.IPAddress } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
+                2>/dev/null | tr -d '\r\n') || true
+        fi
+
+        # Found a 192.168.56.x IP?
+        if [[ "$HOSTONLY_IP" == 192.168.56.* ]] && [ -n "$HOSTONLY_IFACE" ]; then
+            break # Found it!
+        fi
+
+        # If we got something else (like an empty string or a junk IP), it doesn't count.
+        HOSTONLY_IP=""
+        HOSTONLY_IFACE=""
+
+        echo -e "    ${YELLOW}[~] No 192.168.56.x adapter found.${NC}"
+        echo -e "    ${CYAN}    VirtualBox assigns this IP when the Windows VM boots.${NC}"
+        echo -e "    ${CYAN}    If your VM is off or still booting, please wait for the login screen.${NC}"
+        echo ""
+        read -rp "    Press Enter to try detecting again, or 'M' for manual/advanced mode: " CMD
+        if [[ "$CMD" =~ ^[Mm]$ ]]; then
+            break # Exit loop to hit the manual selection logic below
+        fi
+        echo ""
+    done
 
     if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
         echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"
-    else
-        echo -e "    ${YELLOW}[~] No adapter found on 192.168.56.x subnet.${NC}"
         
+        if [ -n "$POWERSHELL_CMD" ]; then
+            echo ""
+            read -rp "    Remove old IP aliases from this interface? (y/N): " RESET_CONFIRM
+            if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
+                remove_aliases "$HOSTONLY_IFACE"
+            fi
+        fi
+    else
+        # Fallback to manual selection if auto-detection failed or was skipped
         if [ -n "$POWERSHELL_CMD" ]; then
             echo -e "    ${CYAN}Attempting to list Windows adapters...${NC}"
             echo ""
@@ -175,6 +286,15 @@ if [ "$IS_WSL" -eq 1 ]; then
                 echo -e "    ${CYAN}(Note: Omit the word 'adapter' — e.g., use 'Ethernet 3' not 'Ethernet adapter Ethernet 3')${NC}"
                 read -rp "    Enter Windows Interface Name (e.g. 'Ethernet 3'): " HOSTONLY_IFACE
                 read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
+            fi
+        fi
+
+        # Offer alias cleanup even for manual selection
+        if [ -n "$HOSTONLY_IFACE" ] && [ -n "$POWERSHELL_CMD" ]; then
+            echo ""
+            read -rp "    Remove old IP aliases from interface '${HOSTONLY_IFACE}'? (y/N): " RESET_CONFIRM
+            if [[ "$RESET_CONFIRM" =~ ^[Yy]$ ]]; then
+                remove_aliases "$HOSTONLY_IFACE"
             fi
         fi
     fi
@@ -270,15 +390,19 @@ fi
 echo -e "${GREEN}[+] Using c2-redirector IP (C2_HOST_IP): ${HOST_IP}${NC}"
 
 # ── 3a. Add IP alias so Docker can bind the c2-redirector port to HOST_IP ──
+# Always attempt — alias is lost on reboot even if .env still has the old IP.
 if [ -n "$HOSTONLY_IFACE" ] && [ "$HOST_IP" != "$HOSTONLY_IP" ]; then
-    if [ "$HOST_IP" != "$CURRENT_IP" ]; then
-        echo ""
-        echo -e "${YELLOW}[*] Adding IP alias ${HOST_IP} on ${HOSTONLY_IFACE}...${NC}"
-        if add_ip_alias "$HOST_IP" "$HOSTONLY_IFACE"; then
-            echo -e "${GREEN}[+] C2 redirector alias added — victim connects to ${HOST_IP}, not ${HOSTONLY_IP}.${NC}"
-        else
-            echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
-        fi
+    echo ""
+    # If the IP changed from the previous run, remove the old alias first.
+    if [ -n "$CURRENT_IP" ] && [ "$HOST_IP" != "$CURRENT_IP" ]; then
+        echo -e "${YELLOW}[*] C2 redirector IP changed ($CURRENT_IP → $HOST_IP), removing old alias...${NC}"
+        remove_alias_ip "$CURRENT_IP" "$HOSTONLY_IFACE"
+    fi
+    echo -e "${YELLOW}[*] Adding IP alias ${HOST_IP} on ${HOSTONLY_IFACE}...${NC}"
+    if add_ip_alias "$HOST_IP" "$HOSTONLY_IFACE"; then
+        echo -e "${GREEN}[+] C2 redirector alias added — victim connects to ${HOST_IP}, not ${HOSTONLY_IP}.${NC}"
+    else
+        echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
     fi
 fi
 
@@ -314,15 +438,19 @@ fi
 echo -e "${GREEN}[+] Using exfil-redirector IP (EXFIL_HOST_IP): ${EXFIL_IP}${NC}"
 
 # ── 3c. Add IP alias for exfil-redirector ─────────────────────────
+# Always attempt — alias is lost on reboot even if .env still has the old IP.
 if [ -n "$HOSTONLY_IFACE" ] && [ "$EXFIL_IP" != "$HOSTONLY_IP" ]; then
-    if [ "$EXFIL_IP" != "$CURRENT_EXFIL_IP" ]; then
-        echo ""
-        echo -e "${YELLOW}[*] Adding IP alias ${EXFIL_IP} on ${HOSTONLY_IFACE}...${NC}"
-        if add_ip_alias "$EXFIL_IP" "$HOSTONLY_IFACE"; then
-            echo -e "${GREEN}[+] Exfil redirector alias added — implant exfil POSTs to ${EXFIL_IP}, not ${HOSTONLY_IP}.${NC}"
-        else
-            echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
-        fi
+    echo ""
+    # If the exfil IP changed from the previous run, remove the old alias first.
+    if [ -n "$CURRENT_EXFIL_IP" ] && [ "$EXFIL_IP" != "$CURRENT_EXFIL_IP" ]; then
+        echo -e "${YELLOW}[*] Exfil redirector IP changed ($CURRENT_EXFIL_IP → $EXFIL_IP), removing old alias...${NC}"
+        remove_alias_ip "$CURRENT_EXFIL_IP" "$HOSTONLY_IFACE"
+    fi
+    echo -e "${YELLOW}[*] Adding IP alias ${EXFIL_IP} on ${HOSTONLY_IFACE}...${NC}"
+    if add_ip_alias "$EXFIL_IP" "$HOSTONLY_IFACE"; then
+        echo -e "${GREEN}[+] Exfil redirector alias added — implant exfil POSTs to ${EXFIL_IP}, not ${HOSTONLY_IP}.${NC}"
+    else
+        echo -e "${CYAN}[~] Alias already exists or could not be added (continuing).${NC}"
     fi
 fi
 
@@ -424,6 +552,52 @@ if [ $CONFLICT -eq 1 ]; then
     fi
 else
     echo -e "${GREEN}[+] No port conflicts.${NC}"
+fi
+
+# ── 6. Verify IP aliases exist before Docker tries to bind them ───────────
+# Docker Desktop 500 error means the IP doesn't exist on the host yet.
+# Catch this here rather than letting docker compose fail mid-build.
+echo ""
+echo -e "${YELLOW}[*] Verifying IP aliases are present on host...${NC}"
+
+ip_exists() {
+    local ip="$1"
+    if [ "$IS_WSL" -eq 1 ] && [ -n "$POWERSHELL_CMD" ]; then
+        "$POWERSHELL_CMD" -Command \
+            "Get-NetIPAddress -IPAddress '$ip' -ErrorAction SilentlyContinue" \
+            &>/dev/null || true
+        "$POWERSHELL_CMD" -Command \
+            "if (Get-NetIPAddress -IPAddress '$ip' -EA SilentlyContinue) { exit 0 } else { exit 1 }" \
+            &>/dev/null
+    else
+        ip addr show 2>/dev/null | grep -q "inet ${ip}/"
+    fi
+}
+
+ALIAS_OK=1
+for CHECK_IP in "$HOST_IP" "$EXFIL_IP"; do
+    if ip_exists "$CHECK_IP"; then
+        echo -e "    ${GREEN}[+] $CHECK_IP is present on host.${NC}"
+    else
+        echo -e "    ${RED}[!] $CHECK_IP is NOT assigned to any interface.${NC}"
+        echo -e "    ${CYAN}    Docker will fail to bind ports to this IP.${NC}"
+        if [ "$IS_WSL" -eq 1 ] && [ -n "$HOSTONLY_IFACE" ]; then
+            echo -e "    ${CYAN}    Run this in an admin PowerShell, then re-run launch.sh:${NC}"
+            echo -e "    ${CYAN}    netsh interface ip add address name='${HOSTONLY_IFACE}' addr=${CHECK_IP} mask=255.255.255.0${NC}"
+        fi
+        ALIAS_OK=0
+    fi
+done
+
+if [ "$ALIAS_OK" -eq 0 ]; then
+    read -rp "    One or more IPs are missing. Continue anyway? (y/N): " ALIAS_CONFIRM
+    ALIAS_CONFIRM="${ALIAS_CONFIRM:-N}"
+    if [[ ! "$ALIAS_CONFIRM" =~ ^[Yy]$ ]]; then
+        echo -e "${RED}[!] Exiting. Add the missing aliases and re-run.${NC}"
+        exit 1
+    fi
+else
+    echo -e "${GREEN}[+] All IP aliases confirmed.${NC}"
 fi
 
 # ── 7. Build and launch ───────────────────────

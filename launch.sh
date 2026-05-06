@@ -34,7 +34,7 @@ add_ip_alias() {
         local result
         result=$(powershell.exe -Command \
             "netsh interface ip add address '$iface' $ip 255.255.255.0" \
-            2>&1 | tr -d '\r')
+            2>&1 | tr -d '\r') || true
         if echo "$result" | grep -qiE "ok|completed successfully"; then
             return 0
         else
@@ -90,11 +90,11 @@ if [ "$IS_WSL" -eq 1 ]; then
     # as "Ethernet", "Ethernet 2", etc. instead of a clearly labelled VirtualBox adapter.
     HOSTONLY_IP=$(powershell.exe -Command \
         "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' } | Select-Object -First 1 -ExpandProperty IPAddress" \
-        2>/dev/null | tr -d '\r\n')
+        2>/dev/null | tr -d '\r\n') || true
 
     HOSTONLY_IFACE=$(powershell.exe -Command \
         "\$a = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.IPAddress -like '192.168.56.*' } | Select-Object -First 1; if (\$a) { (Get-NetAdapter -InterfaceIndex \$a.InterfaceIndex).Name }" \
-        2>/dev/null | tr -d '\r\n')
+        2>/dev/null | tr -d '\r\n') || true
 
     if [ -n "$HOSTONLY_IP" ] && [ -n "$HOSTONLY_IFACE" ]; then
         echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"

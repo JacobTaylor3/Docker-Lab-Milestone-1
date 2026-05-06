@@ -107,7 +107,11 @@ if [ "$IS_WSL" -eq 1 ]; then
             2>/dev/null | tr -d '\r')
 
         if [ ${#ADAPTERS[@]} -eq 0 ]; then
-            echo -e "    ${RED}[!] No active Windows adapters found.${NC}"
+            echo -e "    ${YELLOW}[!] No active Windows adapters could be detected automatically.${NC}"
+            echo -e "    ${CYAN}You will need to enter your VirtualBox interface details manually.${NC}"
+            echo ""
+            read -rp "    Enter Windows Interface Name (e.g. 'VirtualBox Host-Only Network'): " HOSTONLY_IFACE
+            read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
         else
             for i in "${!ADAPTERS[@]}"; do
                 NAME=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f1 | sed 's/ *$//g')
@@ -122,9 +126,11 @@ if [ "$IS_WSL" -eq 1 ]; then
                 INDEX=$((SELECTION-1))
                 HOSTONLY_IFACE=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f1 | sed 's/ *$//g')
                 HOSTONLY_IP=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f2 | sed 's/^ *//g')
-            elif [[ "$SELECTION" =~ ^[Mm]$ ]]; then
+            else
+                # Default to manual entry for 'M' or any invalid selection
+                echo ""
                 read -rp "    Enter Windows Interface Name (e.g. 'VirtualBox Host-Only Network'): " HOSTONLY_IFACE
-                read -rp "    Enter Interface IP (e.g. 192.168.99.1): " HOSTONLY_IP
+                read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
             fi
         fi
     fi

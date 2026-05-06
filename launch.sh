@@ -42,6 +42,9 @@ add_ip_alias() {
 
     if [ "$IS_WSL" -eq 1 ]; then
         if [ -n "$POWERSHELL_CMD" ]; then
+            # Clean up old alias if it exists (ignore errors if it doesn't)
+            "$POWERSHELL_CMD" -Command "netsh interface ip delete address '$iface' $ip" &>/dev/null || true
+            
             local result
             # Use outer double quotes for the command and inner single quotes for the interface name
             # This is the specific format verified to work in WSL-to-Windows interop
@@ -60,9 +63,12 @@ add_ip_alias() {
         fi
 
         echo -e "    Open an ${RED}admin${NC} PowerShell on Windows and run:"
+        echo -e "    ${CYAN}netsh interface ip delete address '$iface' $ip${NC}"
         echo -e "    ${CYAN}netsh interface ip add address '$iface' $ip 255.255.255.0${NC}"
         read -rp "    Press Enter once done (or Enter to skip and continue): "
     else
+        # Linux cleanup
+        sudo ip addr del "${ip}/24" dev "$iface" 2>/dev/null || true
         if sudo ip addr add "${ip}/24" dev "$iface" 2>/dev/null; then
             return 0
         fi

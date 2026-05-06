@@ -1,9 +1,9 @@
-# Capstone Docker Lab — Milestone 2
+# Capstone Docker Lab 
 
 
 ## Exploit Plan
 
-The victim browses to a hosted webpage. The exploit initiates via shellcode embedded in `utils.js` (runs client-side in the victim's browser via CVE-2021-21220). The shellcode runs on the victim's machine, calls the HTTPS delivery server, downloads `MicrosoftEdgeUpdate.exe`, and executes it — all without visible windows. Once running, the implant enrolls with the C2 server over one-way TLS to receive a signed certificate, then reconnects over full mutual TLS. The C2 controller receives the connection and presents an interactive reverse-shell menu, allowing the operator to run Windows commands remotely on the victim's machine.
+The victim browses to a hosted webpage. The exploit initiates via shellcode embedded in `utils.js` (runs client-side in the victim's browser via CVE-2021-21220). The shellcode runs on the victim's machine, calls the HTTPS delivery server, downloads `MicrosoftEdgeUpdate.exe`, and executes it. Once running, the implant enrolls with the C2 server over one-way TLS to receive a signed certificate, then reconnects over full mutual TLS. The C2 controller receives the connection and presents an interactive reverse-shell menu, allowing the operator to run Windows commands remotely on the victim's machine.
 
 ---
 

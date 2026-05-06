@@ -30,10 +30,15 @@ fi
 add_ip_alias() {
     local ip="$1"
     local iface="$2"
+    
+    # Strip any existing quotes from iface name to avoid doubling up
+    iface=$(echo "$iface" | sed "s/['\"]//g")
+
     if [ "$IS_WSL" -eq 1 ]; then
         local result
+        # Wrap the interface name in escaped double quotes for the netsh command
         result=$(powershell.exe -Command \
-            "netsh interface ip add address '$iface' $ip 255.255.255.0" \
+            "netsh interface ip add address \"$iface\" $ip 255.255.255.0" \
             2>&1 | tr -d '\r') || true
         if echo "$result" | grep -qiE "ok|completed successfully"; then
             return 0
@@ -101,15 +106,15 @@ if [ "$IS_WSL" -eq 1 ]; then
         echo -e "    ${CYAN}Attempting to list Windows adapters...${NC}"
         echo ""
 
-        # Simplified PowerShell command to list Name and IP
+        # Simplified PowerShell command using single quotes for bash to avoid escaping hell
         mapfile -t ADAPTERS < <(powershell.exe -Command \
-            "Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { \$a = Get-NetAdapter -InterfaceIndex \$_.InterfaceIndex; \"\$(\$a.Name) | \$(\$_.IPAddress)\" }" 2>/dev/null | grep -v '127.0.0.1' | grep -v '169.254.' | tr -d '\r') || true
+            'Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { $a = Get-NetAdapter -InterfaceIndex $_.InterfaceIndex; "$($a.Name) | $($_.IPAddress)" }' 2>/dev/null | grep -v '127.0.0.1' | grep -v '169.254.' | tr -d '\r') || true
 
         if [ ${#ADAPTERS[@]} -eq 0 ]; then
             echo -e "    ${YELLOW}[!] Could not detect adapters automatically.${NC}"
             echo -e "    ${CYAN}Please enter your VirtualBox interface details manually.${NC}"
             echo ""
-            read -rp "    Enter Windows Interface Name (use 'single quotes' if it has spaces): " HOSTONLY_IFACE
+            read -rp "    Enter Windows Interface Name (e.g. VirtualBox Host-Only Network): " HOSTONLY_IFACE
             read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
         else
             for i in "${!ADAPTERS[@]}"; do
@@ -128,7 +133,7 @@ if [ "$IS_WSL" -eq 1 ]; then
                 HOSTONLY_IP=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f2 | sed 's/^ *//g')
             else
                 echo ""
-                read -rp "    Enter Windows Interface Name (use 'single quotes' if it has spaces): " HOSTONLY_IFACE
+                read -rp "    Enter Windows Interface Name (e.g. VirtualBox Host-Only Network): " HOSTONLY_IFACE
                 read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
             fi
         fi

@@ -98,24 +98,24 @@ if [ "$IS_WSL" -eq 1 ]; then
         echo -e "    ${GREEN}$HOSTONLY_IFACE${NC} → $HOSTONLY_IP  ${CYAN}← host-only adapter (192.168.56.x)${NC}"
     else
         echo -e "    ${YELLOW}[~] No adapter found on 192.168.56.x subnet.${NC}"
-        echo -e "    ${CYAN}Listing all active Windows IPv4 adapters:${NC}"
+        echo -e "    ${CYAN}Attempting to list Windows adapters...${NC}"
         echo ""
 
-        # Get list of adapters: "Name | IP"
+        # Simplified PowerShell command to list Name and IP
         mapfile -t ADAPTERS < <(powershell.exe -Command \
-            "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.AddressState -eq 'Preferred' -and \$_.IPAddress -notlike '127.*' -and \$_.IPAddress -notlike '169.254.*' } | ForEach-Object { \$adapter = Get-NetAdapter -InterfaceIndex \$_.InterfaceIndex; \"\$(\$adapter.Name) | \$(\$_.IPAddress)\" }" \
-            2>/dev/null | tr -d '\r')
+            "Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { \$a = Get-NetAdapter -InterfaceIndex \$_.InterfaceIndex; \"\$(\$a.Name) | \$(\$_.IPAddress)\" }" 2>/dev/null | grep -v '127.0.0.1' | grep -v '169.254.' | tr -d '\r') || true
 
         if [ ${#ADAPTERS[@]} -eq 0 ]; then
-            echo -e "    ${YELLOW}[!] No active Windows adapters could be detected automatically.${NC}"
-            echo -e "    ${CYAN}You will need to enter your VirtualBox interface details manually.${NC}"
+            echo -e "    ${YELLOW}[!] Could not detect adapters automatically.${NC}"
+            echo -e "    ${CYAN}Please enter your VirtualBox interface details manually.${NC}"
             echo ""
-            read -rp "    Enter Windows Interface Name (e.g. 'VirtualBox Host-Only Network'): " HOSTONLY_IFACE
+            read -rp "    Enter Windows Interface Name (use 'single quotes' if it has spaces): " HOSTONLY_IFACE
             read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
         else
             for i in "${!ADAPTERS[@]}"; do
                 NAME=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f1 | sed 's/ *$//g')
                 IP=$(echo "${ADAPTERS[$i]}" | cut -d'|' -f2 | sed 's/^ *//g')
+                [ -z "$NAME" ] && continue
                 echo -e "      [$((i+1))] ${GREEN}$NAME${NC} → $IP"
             done
             echo -e "      [M] Enter interface name manually"
@@ -127,9 +127,8 @@ if [ "$IS_WSL" -eq 1 ]; then
                 HOSTONLY_IFACE=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f1 | sed 's/ *$//g')
                 HOSTONLY_IP=$(echo "${ADAPTERS[$INDEX]}" | cut -d'|' -f2 | sed 's/^ *//g')
             else
-                # Default to manual entry for 'M' or any invalid selection
                 echo ""
-                read -rp "    Enter Windows Interface Name (e.g. 'VirtualBox Host-Only Network'): " HOSTONLY_IFACE
+                read -rp "    Enter Windows Interface Name (use 'single quotes' if it has spaces): " HOSTONLY_IFACE
                 read -rp "    Enter Interface IP (e.g. 192.168.56.1): " HOSTONLY_IP
             fi
         fi

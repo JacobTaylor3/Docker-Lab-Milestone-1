@@ -18,7 +18,7 @@ The victim browses to a hosted webpage. The exploit initiates via shellcode embe
 ├── README.md                       # Setup and usage instructions
 ├── documentation/
 │   ├── ProjectOverview.md          # Full architecture, crypto pipeline, payload flow, changelog
-│   ├── Final-Deliverable.md        # Grading rubric + implementation status
+│   ├── threat_model.svg            # Threat Model Diagram
 │   
 │   
 │  
